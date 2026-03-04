@@ -7,14 +7,14 @@ BitTorrent.</strong>
 <br>When someone needs a file,
 just <strong>edge it to them.</strong>
 </p>
-------------------------------------------------------------------------
+
 
 ## 📸 Screenshots
 
 <img src = "res/ss1.png" width="600px">
 <img src = "res/ss2.png" width="600px">
 <img src = "res/ss3.png" width="600px">
-------------------------------------------------------------------------
+
 
 # 🚀 What is Edge?
 
@@ -35,7 +35,6 @@ The name was inspired by **edge routers** which are "located at the boundary of 
 -   🧲 Torrent client baked in
 -   🔥 Edge Streak system
 
-------------------------------------------------------------------------
 
 # 🧠 Core Philosophy
 
@@ -49,10 +48,9 @@ If someone needs a file:
 
 > **Just edge it to them.**
 
-------------------------------------------------------------------------
 
 # 🌐 Transport Modes
-
+<br></nr>
 ## ⚡ LAN Mode
 
 -   Automatic peer discovery
@@ -61,7 +59,7 @@ If someone needs a file:
 -   Same-network optimized
 -   Extremely fast (limited by LAN/disk bandwidth)
 
-------------------------------------------------------------------------
+
 
 ## 🌍 WAN Mode (testing still underway)
 
@@ -69,7 +67,7 @@ If someone needs a file:
 -   Requires public reachability or relay
 -   No persistent storage server
 
-------------------------------------------------------------------------
+
 
 ## 🧲 Torrent Mode
 
@@ -77,7 +75,7 @@ If someone needs a file:
 -   Stream video files
 -   Default trackers list available in settings
 
-------------------------------------------------------------------------
+
 
 # 🔥 Edge Streak
 
@@ -93,7 +91,7 @@ Is it useful?\
 Is it slightly competitive?\
 **Also yes.**
 
-------------------------------------------------------------------------
+
 
 # 📦 Installation
 
@@ -105,7 +103,6 @@ Prebuilt binaries are available in the Releases section:
 
 Download, run, **edge**.
 
-------------------------------------------------------------------------
 
 ## Option 2 --- Build From Source
 
@@ -126,7 +123,7 @@ Start in development mode:
 ``` bash
 npm run dev
 ```
-------------------------------------------------------------------------
+
 
 # 🔐 Privacy
 
@@ -138,7 +135,7 @@ npm run dev
 
 > **We don't know when you Edge**
 
-------------------------------------------------------------------------
+
 
 # 🗺 Roadmap
 
@@ -146,7 +143,6 @@ npm run dev
 -   Resume interrupted transfers
 -   Transfer throttling
 
-------------------------------------------------------------------------
 
 # 💬 Final Words
 
