@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edge</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Custom title bar -->
+  <div id="titlebar">
+    <div id="titlebar-drag">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color:var(--accent);flex-shrink:0;">
+        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+      </svg>
+      <span>Edge</span>
+    </div>
+    <div id="titlebar-controls">
+      <button id="tb-min" title="Minimise">
+        <svg width="10" height="2" viewBox="0 0 10 2"><rect width="10" height="1.5" y="0.25" rx="1" fill="currentColor"/></svg>
+      </button>
+      <button id="tb-max" title="Maximise">
+        <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+      <button id="tb-close" title="Close">
+        <svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="container">
+    <header>
+      <div class="header-content">
+        <div class="header-left">
+          <h1 style="letter-spacing:-0.5px;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+            </svg>
+            Edge
+          </h1>
+          <div class="mode-tabs">
+            <button class="mode-tab active" data-mode="lan">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                <line x1="8" y1="21" x2="16" y2="21"></line>
+                <line x1="12" y1="17" x2="12" y2="21"></line>
+              </svg>
+              LAN
+            </button>
+            <button class="mode-tab" data-mode="wan">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+              </svg>
+              WAN
+            </button>
+            <button class="mode-tab" data-mode="torrents">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polygon points="10 8 16 12 10 16 10 8"></polygon>
+              </svg>
+              Torrents
+            </button>
+          </div>
+        </div>
+        <div class="user-profile">
+          <div class="avatar-upload" id="avatar-container">
+            <img id="avatar-preview" class="avatar" src="" alt="Avatar" style="display: none;">
+            <div id="avatar-placeholder" class="avatar-placeholder">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                <circle cx="12" cy="7" r="4"></circle>
+              </svg>
+            </div>
+            <input type="file" id="avatar-input" accept="image/*" style="display: none;">
+          </div>
+          <div class="username-container" id="username-container">
+            <span id="username-display" class="username-display" title="Click to edit name">User</span>
+            <input type="text" id="username-input" placeholder="Enter name..." style="display:none;">
+          </div>
+          <button id="settings-btn" title="Settings">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M12 1v6m0 6v6M5.64 5.64l4.24 4.24m4.24 4.24l4.24 4.24M1 12h6m6 0h6M5.64 18.36l4.24-4.24m4.24-4.24l4.24-4.24"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal" style="display: none;">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>Settings</h2>
+          <button id="close-settings" class="close-btn">×</button>
+        </div>
+        <div class="modal-body">
+
+          <!-- File Receiving -->
+          <div class="setting-group">
+            <h3>File Receiving</h3>
+            <label class="radio-label">
+              <input type="radio" name="receive-mode" value="ask-before" checked>
+              <div class="radio-content">
+                <strong>Ask before transfer starts</strong>
+                <small>Accept/decline dialog appears immediately</small>
+              </div>
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="receive-mode" value="auto-accept-ask-location">
+              <div class="radio-content">
+                <strong>Auto-accept, choose save location</strong>
+                <small>Save dialog appears when transfer completes</small>
+              </div>
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="receive-mode" value="auto-accept-downloads">
+              <div class="radio-content">
+                <strong>Auto-accept to Downloads</strong>
+                <small>Files go straight to Downloads folder</small>
+              </div>
+            </label>
+          </div>
+
+          <!-- Theme -->
+          <div class="setting-group">
+            <h3>Torrent Trackers</h3>
+            <p class="setting-desc" style="font-size:0.8rem;color:#888;margin-bottom:0.75rem;">These trackers are added to every torrent you download. One URL per line.</p>
+            <textarea id="tracker-list-input" rows="5" style="width:100%;background:#1a1a1a;border:1px solid #333;color:#e0e0e0;border-radius:8px;padding:0.6rem 0.8rem;font-family:monospace;font-size:0.78rem;resize:vertical;"></textarea>
+            <button id="save-trackers-btn" class="primary-btn" style="margin-top:0.6rem;padding:0.45rem 1rem;font-size:0.85rem;">Save Trackers</button>
+          </div>
+
+          <div class="setting-group">
+            <h3>Theme</h3>
+            <div class="theme-presets" id="theme-presets">
+              <button class="theme-preset active" data-theme="default" title="Default">
+                <span class="theme-swatch" style="background:linear-gradient(135deg,#1e1e1e,#4a9eff)"></span>
+                <span>Default</span>
+              </button>
+              <button class="theme-preset" data-theme="forest" title="Forest">
+                <span class="theme-swatch" style="background:linear-gradient(135deg,#1a2318,#4ade80)"></span>
+                <span>Forest</span>
+              </button>
+              <button class="theme-preset" data-theme="seafoam" title="Sea Foam">
+                <span class="theme-swatch" style="background:linear-gradient(135deg,#0d1f1e,#2dd4bf)"></span>
+                <span>Sea Foam</span>
+              </button>
+              <button class="theme-preset" data-theme="sunset" title="Sunset">
+                <span class="theme-swatch" style="background:linear-gradient(135deg,#1f1510,#fb923c)"></span>
+                <span>Sunset</span>
+              </button>
+              <button class="theme-preset" data-theme="lavender" title="Lavender">
+                <span class="theme-swatch" style="background:linear-gradient(135deg,#1a1525,#a78bfa)"></span>
+                <span>Lavender</span>
+              </button>
+              <button class="theme-preset" data-theme="rose" title="Rose">
+                <span class="theme-swatch" style="background:linear-gradient(135deg,#1f1318,#f472b6)"></span>
+                <span>Rose</span>
+              </button>
+              <button class="theme-preset" data-theme="custom" title="Custom" id="custom-theme-btn">
+                <span class="theme-swatch" id="custom-swatch" style="background:linear-gradient(135deg,#222,#888)"></span>
+                <span>Custom</span>
+              </button>
+            </div>
+
+            <div id="custom-color-panel" style="display:none;" class="custom-color-panel">
+              <div class="color-row">
+                <label>Accent colour</label>
+                <div class="color-input-wrap">
+                  <input type="color" id="color-accent" value="#4a9eff">
+                  <span id="color-accent-hex">#4a9eff</span>
+                </div>
+              </div>
+              <div class="color-row">
+                <label>Background</label>
+                <div class="color-input-wrap">
+                  <input type="color" id="color-bg" value="#1e1e1e">
+                  <span id="color-bg-hex">#1e1e1e</span>
+                </div>
+              </div>
+              <div class="color-row">
+                <label>Surface</label>
+                <div class="color-input-wrap">
+                  <input type="color" id="color-surface" value="#252525">
+                  <span id="color-surface-hex">#252525</span>
+                </div>
+              </div>
+              <div class="color-row">
+                <label>Text</label>
+                <div class="color-input-wrap">
+                  <input type="color" id="color-text" value="#e0e0e0">
+                  <span id="color-text-hex">#e0e0e0</span>
+                </div>
+              </div>
+              <button id="apply-custom-theme" class="primary-btn" style="margin-top:0.75rem;width:100%;">Apply</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <main>
+      <!-- LAN Mode (existing messenger interface) -->
+      <div class="mode-container" id="lan-container" style="display: flex;">
+        <div class="sidebar">
+          <div class="sidebar-header">
+            <h2>Conversations</h2>
+            <span class="peer-count" id="peer-count">0 online</span>
+          </div>
+          <div class="peer-list" id="peer-list">
+            <div class="empty-state">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+              </svg>
+              <p>No peers found</p>
+              <small>Waiting for others on your network...</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="content">
+          <div class="chat-container" id="chat-container">
+            <!-- Chat header -->
+            <div class="chat-header" id="chat-header">
+              <div class="chat-header-empty">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                </svg>
+                <h3>Select a peer to start chatting</h3>
+              </div>
+            </div>
+
+            <!-- Messages area -->
+            <div class="messages-container" id="messages-container">
+              <div class="messages-list" id="messages-list">
+                <!-- Sending files section -->
+                <div class="sending-section" id="sending-section" style="display: none;">
+                  <div class="section-header">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="17 8 12 3 7 8"></polyline>
+                      <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    Sending Files
+                  </div>
+                  <div id="sending-list"></div>
+                </div>
+
+                <!-- Incoming files section -->
+                <div class="incoming-section" id="incoming-section" style="display: none;">
+                  <div class="section-header">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    Incoming Files
+                  </div>
+                  <div id="incoming-list"></div>
+                </div>
+
+                <!-- Chat messages -->
+                <div id="chat-messages"></div>
+              </div>
+            </div>
+
+            <!-- Input area -->
+            <div class="input-area" id="input-area">
+              <input type="text" id="message-input" placeholder="Type a message..." maxlength="200">
+              <button id="attach-btn" title="Attach file">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                </svg>
+              </button>
+              <input type="file" id="file-input" multiple style="display: none;">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- WAN Mode (link sharing) -->
+      <div class="mode-container" id="wan-container" style="display: none;">
+        <div class="wan-content">
+          <div class="wan-panel">
+            <h2>Send Files Over Internet</h2>
+            <p class="subtitle">100% private P2P — no server, no third party</p>
+
+            <!-- SEND -->
+            <div class="wan-section">
+              <div class="wan-section-header"><span class="wan-section-icon">📤</span><h3>Send a File</h3></div>
+              <div class="wan-drop-zone" id="wan-drop-zone">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="17 8 12 3 7 8"></polyline>
+                  <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                <p>Drop file here or click to select</p>
+                <input type="file" id="wan-file-input" style="display: none;">
+              </div>
+
+              <div id="wan-selected-file" style="display:none;" class="wan-selected-file">
+                <div class="wan-file-info">
+                  <span id="wan-selected-filename"></span>
+                  <span id="wan-selected-size" class="wan-file-size"></span>
+                </div>
+                <div class="wan-tier-chooser">
+                  <div class="wan-tier wan-tier-recommended" id="tier-private">
+                    <div class="tier-badge">🔒 Most Private</div>
+                    <div class="tier-title">Private Direct</div>
+                    <div class="tier-desc">Your IP embedded in link. Friend connects directly to you. No tracker, no DHT. Requires open port or VPN.</div>
+                    <div class="tier-note">Best for: photos, personal files</div>
+                    <button class="tier-btn" id="btn-send-private">Generate Private Link</button>
+                  </div>
+                  <div class="wan-tier" id="tier-semi">
+                    <div class="tier-badge">🛡 Private Enough</div>
+                    <div class="tier-title">DHT Fallback</div>
+                    <div class="tier-desc">Uses DHT for discovery. No trackers. Infohash is unguessable. Works through NAT without port forwarding.</div>
+                    <div class="tier-note">Use if: private link can't connect</div>
+                    <button class="tier-btn" id="btn-send-semi">Generate DHT Link</button>
+                  </div>
+                  <div class="wan-tier" id="tier-direct">
+                    <div class="tier-badge">⚡ Fastest</div>
+                    <div class="tier-title">Direct IP</div>
+                    <div class="tier-desc">Pure TCP. No torrent overhead. Requires open port or same network.</div>
+                    <div class="tier-note">Use if: you have port forwarding</div>
+                    <button class="tier-btn" id="btn-send-direct">Share Direct IP</button>
+                  </div>
+                </div>
+              </div>
+
+              <div id="wan-link-result" style="display:none;" class="wan-link-result">
+                <div class="wan-link-header">
+                  <span id="wan-link-mode-label"></span>
+                  <button id="wan-cancel-send-btn" class="wan-small-btn danger">✕ Cancel</button>
+                </div>
+                <div class="link-display">
+                  <input type="text" id="wan-magnet-output" readonly>
+                  <button class="copy-btn" data-target="wan-magnet-output">Copy</button>
+                </div>
+                <p id="wan-link-privacy-note" class="link-note"></p>
+                <div style="display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap;align-items:center;">
+                  <button id="wan-export-torrent-btn" class="wan-small-btn" style="background:#2a3a2a;border:1px solid #4ade8060;color:#4ade80;">💾 Save as .torrent file</button>
+                  <span style="font-size:0.75rem;color:#666;">Alternative format — works in any torrent client</span>
+                </div>
+                <div class="wan-send-status" id="wan-send-status">
+                  <span class="status-dot pulsing"></span>
+                  <span id="wan-send-status-text">Waiting for connection...</span>
+                  <span id="wan-send-peers" class="wan-peers-badge">0 peers</span>
+                </div>
+                <div class="wan-progress-bar-wrap" id="wan-send-progress-wrap" style="display:none;">
+                  <div class="progress-bar"><div class="progress-fill" id="wan-send-progress-fill" style="width:0%"></div></div>
+                  <span id="wan-send-progress-text">0%</span>
+                </div>
+              </div>
+
+              <div id="wan-direct-result" style="display:none;" class="wan-link-result">
+                <div class="wan-link-header"><span>⚡ Direct IP Connection</span></div>
+                <p style="font-size:0.85rem;color:#aaa;margin-bottom:0.5rem;">Share your IP:port — your friend connects directly.</p>
+                <div style="display:flex;gap:0.5rem;">
+                  <div style="flex:1;"><label style="font-size:0.75rem;color:#888;">Public IP</label>
+                    <div class="link-display"><input type="text" id="wan-public-ip-display" readonly><button class="copy-btn" data-target="wan-public-ip-display">Copy</button></div></div>
+                  <div style="flex:1;"><label style="font-size:0.75rem;color:#888;">Local IP</label>
+                    <div class="link-display"><input type="text" id="wan-local-ip-display" readonly><button class="copy-btn" data-target="wan-local-ip-display">Copy</button></div></div>
+                </div>
+                <p class="link-note">⚠️ Public IP needs port forwarding. Local IP works on same WiFi.</p>
+              </div>
+            </div>
+
+            <div class="wan-divider"></div>
+
+            <!-- RECEIVE -->
+            <div class="wan-section">
+              <div class="wan-section-header"><span class="wan-section-icon">📥</span><h3>Receive a File</h3></div>
+              <div class="wan-receive-form">
+                <input type="text" id="wan-receive-input" placeholder="Paste magnet link, or drag a .torrent file here" class="wan-receive-input">
+                <button id="wan-receive-btn" class="primary-btn">Download</button>
+                <button id="wan-open-torrent-btn" class="wan-small-btn" style="background:#2a3a2a;border:1px solid #4ade8060;color:#4ade80;padding:0.75rem 1rem;white-space:nowrap;border-radius:8px;cursor:pointer;font-size:0.85rem;">📂 Open .torrent</button>
+              </div>
+              <p class="link-note" style="margin-top:0.5rem;">Paste a magnet link, or open/drag a .torrent file</p>
+              <div id="wan-receive-status" style="display:none;" class="wan-receive-status">
+                <div class="wan-receive-header">
+                  <span id="wan-receive-filename">Fetching metadata...</span>
+                  <button id="wan-cancel-receive-btn" class="wan-small-btn danger">✕ Cancel</button>
+                </div>
+                <div class="wan-send-status">
+                  <span class="status-dot pulsing"></span>
+                  <span id="wan-receive-status-text">Connecting to peer...</span>
+                  <span id="wan-receive-peers" class="wan-peers-badge">0 peers</span>
+                </div>
+                <div class="wan-progress-bar-wrap">
+                  <div class="progress-bar"><div class="progress-fill" id="wan-receive-progress-fill" style="width:0%"></div></div>
+                  <span id="wan-receive-progress-text">0%</span>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <!-- Torrents Mode -->
+      <div class="mode-container" id="torrents-container" style="display: none;">
+        <div class="torrents-content">
+          <div class="torrents-header">
+            <div>
+              <h2>Torrent Client</h2>
+              <p class="torrents-subtitle">Public DHT · No private files</p>
+            </div>
+            <button id="add-torrent-btn" class="primary-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              Add Torrent
+            </button>
+          </div>
+          <div class="torrents-list" id="torrents-list">
+            <div class="empty-state">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polygon points="10 8 16 12 10 16 10 8"></polygon>
+              </svg>
+              <p>No active torrents</p>
+              <small>Click "Add Torrent" and paste a magnet link</small>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Torrent Add Modal -->
+  <div id="torrent-add-modal" class="modal" style="display:none;">
+    <div class="modal-content" style="max-width:480px;">
+      <div class="modal-header">
+        <h2>Add Torrent</h2>
+        <button id="torrent-modal-close" class="close-btn">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="setting-group" style="margin-bottom:0;">
+          <h3 style="margin-bottom:0.75rem;">Magnet Link</h3>
+          <textarea id="torrent-magnet-input" placeholder="magnet:?xt=urn:btih:..." style="width:100%;height:80px;background:#1a1a1a;border:1px solid #333;color:#e0e0e0;border-radius:8px;padding:0.6rem 0.8rem;font-family:monospace;font-size:0.82rem;resize:vertical;"></textarea>
+          <div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.9rem;">
+            <div style="flex:1;height:1px;background:#333;"></div>
+            <span style="color:#555;font-size:0.8rem;">or</span>
+            <div style="flex:1;height:1px;background:#333;"></div>
+          </div>
+          <button id="torrent-pick-file-btn" class="wan-small-btn" style="width:100%;margin-top:0.9rem;padding:0.65rem;text-align:center;font-size:0.88rem;">
+            📂 Open .torrent file
+          </button>
+        </div>
+      </div>
+      <div style="display:flex;gap:0.6rem;padding:1rem 1.25rem;border-top:1px solid #2e2e2e;">
+        <button id="torrent-modal-cancel" class="wan-small-btn" style="flex:1;">Cancel</button>
+        <button id="torrent-modal-add" class="primary-btn" style="flex:2;">Add Torrent</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
