@@ -61,7 +61,7 @@ If someone needs a file:
 
 
 
-## 🌍 WAN Mode (testing still underway)
+## 🌍 WAN Mode (testing still underway, functionality not fully implemented)
 
 -   Direct peer-to-peer transfer
 -   Requires public reachability or relay
