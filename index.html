@@ -272,11 +272,35 @@
             </div>
 
             <!-- Input area -->
+            <div id="typing-indicator"></div>
+            <!-- Reply quote bar (hidden until replying) -->
+            <div id="reply-bar" style="display:none;">
+              <div id="reply-bar-inner">
+                <div id="reply-bar-label">↩ Replying to <strong id="reply-bar-sender"></strong></div>
+                <div id="reply-bar-preview"></div>
+              </div>
+              <button id="reply-bar-cancel" title="Cancel reply">✕</button>
+            </div>
             <div class="input-area" id="input-area">
-              <input type="text" id="message-input" placeholder="Type a message..." maxlength="200">
               <button id="attach-btn" title="Attach file">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                </svg>
+              </button>
+              <div class="input-wrap" id="input-wrap">
+                <textarea id="message-input" placeholder="Type a message… (Shift+Enter for newline)" rows="1"></textarea>
+                <div id="message-preview" class="message-preview" style="display:none;"></div>
+              </div>
+              <button id="preview-btn" title="Toggle markdown preview" class="preview-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                  <circle cx="12" cy="12" r="3"></circle>
+                </svg>
+              </button>
+              <button id="send-btn" title="Send (Enter)">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="22" y1="2" x2="11" y2="13"></line>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
                 </svg>
               </button>
               <input type="file" id="file-input" multiple style="display: none;">
@@ -285,125 +309,142 @@
         </div>
       </div>
 
-      <!-- WAN Mode (link sharing) -->
+      <!-- WAN Mode — UPnP primary, WebRTC fallback -->
       <div class="mode-container" id="wan-container" style="display: none;">
         <div class="wan-content">
           <div class="wan-panel">
             <h2>Send Files Over Internet</h2>
-            <p class="subtitle">100% private P2P — no server, no third party</p>
+            <p class="subtitle">Direct peer-to-peer · no server · works through most home routers</p>
 
-            <!-- SEND -->
+            <!-- ══ SEND ══════════════════════════════════════ -->
             <div class="wan-section">
-              <div class="wan-section-header"><span class="wan-section-icon">📤</span><h3>Send a File</h3></div>
+              <div class="wan-section-header"><span class="wan-section-icon">📤</span><h3>Send</h3></div>
+
               <div class="wan-drop-zone" id="wan-drop-zone">
-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                   <polyline points="17 8 12 3 7 8"></polyline>
                   <line x1="12" y1="3" x2="12" y2="15"></line>
                 </svg>
                 <p>Drop file here or click to select</p>
-                <input type="file" id="wan-file-input" style="display: none;">
+                <input type="file" id="wan-file-input" style="display:none;">
               </div>
 
-              <div id="wan-selected-file" style="display:none;" class="wan-selected-file">
-                <div class="wan-file-info">
-                  <span id="wan-selected-filename"></span>
-                  <span id="wan-selected-size" class="wan-file-size"></span>
-                </div>
-                <div class="wan-tier-chooser">
-                  <div class="wan-tier wan-tier-recommended" id="tier-private">
-                    <div class="tier-badge">🔒 Most Private</div>
-                    <div class="tier-title">Private Direct</div>
-                    <div class="tier-desc">Your IP embedded in link. Friend connects directly to you. No tracker, no DHT. Requires open port or VPN.</div>
-                    <div class="tier-note">Best for: photos, personal files</div>
-                    <button class="tier-btn" id="btn-send-private">Generate Private Link</button>
-                  </div>
-                  <div class="wan-tier" id="tier-semi">
-                    <div class="tier-badge">🛡 Private Enough</div>
-                    <div class="tier-title">DHT Fallback</div>
-                    <div class="tier-desc">Uses DHT for discovery. No trackers. Infohash is unguessable. Works through NAT without port forwarding.</div>
-                    <div class="tier-note">Use if: private link can't connect</div>
-                    <button class="tier-btn" id="btn-send-semi">Generate DHT Link</button>
-                  </div>
-                  <div class="wan-tier" id="tier-direct">
-                    <div class="tier-badge">⚡ Fastest</div>
-                    <div class="tier-title">Direct IP</div>
-                    <div class="tier-desc">Pure TCP. No torrent overhead. Requires open port or same network.</div>
-                    <div class="tier-note">Use if: you have port forwarding</div>
-                    <button class="tier-btn" id="btn-send-direct">Share Direct IP</button>
-                  </div>
-                </div>
-              </div>
+              <!-- After file selected -->
+              <div id="wan-send-ready" style="display:none;">
+                <div class="rtc-file-pill" id="wan-send-filepill"></div>
 
-              <div id="wan-link-result" style="display:none;" class="wan-link-result">
-                <div class="wan-link-header">
-                  <span id="wan-link-mode-label"></span>
-                  <button id="wan-cancel-send-btn" class="wan-small-btn danger">✕ Cancel</button>
+                <!-- UPnP: single code -->
+                <div id="upnp-send-panel">
+                  <div class="rtc-step">
+                    <div class="rtc-step-num">1</div>
+                    <div class="rtc-step-body">
+                      <div class="rtc-step-label">Send this code to your friend</div>
+                      <div class="link-display">
+                        <input type="text" id="upnp-offer-out" readonly placeholder="Opening port…">
+                        <button class="copy-btn" data-target="upnp-offer-out">Copy</button>
+                      </div>
+                      <div class="rtc-step-hint" id="upnp-send-hint">Contacting your router via UPnP…</div>
+                    </div>
+                  </div>
+                  <div id="upnp-send-status" style="display:none;margin-top:0.6rem;" class="wan-send-status">
+                    <span class="status-dot pulsing" id="upnp-send-dot"></span>
+                    <span id="upnp-send-status-text">Waiting for receiver…</span>
+                  </div>
+                  <div class="wan-progress-bar-wrap" id="upnp-send-progress" style="display:none;margin-top:0.4rem;">
+                    <div class="progress-bar"><div class="progress-fill" id="upnp-send-fill" style="width:0%"></div></div>
+                    <span id="upnp-send-pct">0%</span>
+                  </div>
                 </div>
-                <div class="link-display">
-                  <input type="text" id="wan-magnet-output" readonly>
-                  <button class="copy-btn" data-target="wan-magnet-output">Copy</button>
-                </div>
-                <p id="wan-link-privacy-note" class="link-note"></p>
-                <div style="display:flex;gap:0.5rem;margin-top:0.75rem;flex-wrap:wrap;align-items:center;">
-                  <button id="wan-export-torrent-btn" class="wan-small-btn" style="background:#2a3a2a;border:1px solid #4ade8060;color:#4ade80;">💾 Save as .torrent file</button>
-                  <span style="font-size:0.75rem;color:#666;">Alternative format — works in any torrent client</span>
-                </div>
-                <div class="wan-send-status" id="wan-send-status">
-                  <span class="status-dot pulsing"></span>
-                  <span id="wan-send-status-text">Waiting for connection...</span>
-                  <span id="wan-send-peers" class="wan-peers-badge">0 peers</span>
-                </div>
-                <div class="wan-progress-bar-wrap" id="wan-send-progress-wrap" style="display:none;">
-                  <div class="progress-bar"><div class="progress-fill" id="wan-send-progress-fill" style="width:0%"></div></div>
-                  <span id="wan-send-progress-text">0%</span>
-                </div>
-              </div>
 
-              <div id="wan-direct-result" style="display:none;" class="wan-link-result">
-                <div class="wan-link-header"><span>⚡ Direct IP Connection</span></div>
-                <p style="font-size:0.85rem;color:#aaa;margin-bottom:0.5rem;">Share your IP:port — your friend connects directly.</p>
-                <div style="display:flex;gap:0.5rem;">
-                  <div style="flex:1;"><label style="font-size:0.75rem;color:#888;">Public IP</label>
-                    <div class="link-display"><input type="text" id="wan-public-ip-display" readonly><button class="copy-btn" data-target="wan-public-ip-display">Copy</button></div></div>
-                  <div style="flex:1;"><label style="font-size:0.75rem;color:#888;">Local IP</label>
-                    <div class="link-display"><input type="text" id="wan-local-ip-display" readonly><button class="copy-btn" data-target="wan-local-ip-display">Copy</button></div></div>
+                <!-- UPnP failed → show WebRTC fallback -->
+                <div id="upnp-fallback-panel" style="display:none;">
+                  <div class="wan-notice warn">⚠ UPnP not available on this router — using encrypted hole-punch instead (requires a reply code)</div>
+                  <div class="rtc-step" style="margin-top:0.5rem;">
+                    <div class="rtc-step-num">1</div>
+                    <div class="rtc-step-body">
+                      <div class="rtc-step-label">Send this code to your friend</div>
+                      <div class="link-display">
+                        <input type="text" id="rtc-offer-out" readonly placeholder="Generating…">
+                        <button class="copy-btn" data-target="rtc-offer-out">Copy</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="rtc-step" id="rtc-step2-send" style="margin-top:0.5rem;opacity:0.4;pointer-events:none;">
+                    <div class="rtc-step-num">2</div>
+                    <div class="rtc-step-body">
+                      <div class="rtc-step-label">Paste the reply code your friend sends back</div>
+                      <div class="link-display">
+                        <input type="text" id="rtc-answer-in" placeholder="Paste reply code…">
+                        <button id="rtc-connect-btn" class="primary-btn">Connect</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div id="rtc-send-progress-wrap" style="display:none;margin-top:0.6rem;">
+                    <div class="wan-send-status">
+                      <span class="status-dot pulsing" id="rtc-send-dot"></span>
+                      <span id="rtc-send-status">Connecting…</span>
+                    </div>
+                    <div class="wan-progress-bar-wrap">
+                      <div class="progress-bar"><div class="progress-fill" id="rtc-send-fill" style="width:0%"></div></div>
+                      <span id="rtc-send-pct">0%</span>
+                    </div>
+                  </div>
                 </div>
-                <p class="link-note">⚠️ Public IP needs port forwarding. Local IP works on same WiFi.</p>
+
+                <button id="wan-send-cancel" class="wan-small-btn danger" style="margin-top:0.75rem;">✕ Cancel</button>
               </div>
             </div>
 
             <div class="wan-divider"></div>
 
-            <!-- RECEIVE -->
+            <!-- ══ RECEIVE ════════════════════════════════════ -->
             <div class="wan-section">
-              <div class="wan-section-header"><span class="wan-section-icon">📥</span><h3>Receive a File</h3></div>
-              <div class="wan-receive-form">
-                <input type="text" id="wan-receive-input" placeholder="Paste magnet link, or drag a .torrent file here" class="wan-receive-input">
-                <button id="wan-receive-btn" class="primary-btn">Download</button>
-                <button id="wan-open-torrent-btn" class="wan-small-btn" style="background:#2a3a2a;border:1px solid #4ade8060;color:#4ade80;padding:0.75rem 1rem;white-space:nowrap;border-radius:8px;cursor:pointer;font-size:0.85rem;">📂 Open .torrent</button>
+              <div class="wan-section-header"><span class="wan-section-icon">📥</span><h3>Receive</h3></div>
+
+              <div class="rtc-step">
+                <div class="rtc-step-num">1</div>
+                <div class="rtc-step-body">
+                  <div class="rtc-step-label">Paste the code your friend sent you</div>
+                  <div class="link-display">
+                    <input type="text" id="wan-recv-input" placeholder="Paste code here…">
+                    <button id="wan-recv-btn" class="primary-btn">Connect</button>
+                  </div>
+                  <div class="rtc-step-hint" id="wan-recv-hint" style="display:none;"></div>
+                </div>
               </div>
-              <p class="link-note" style="margin-top:0.5rem;">Paste a magnet link, or open/drag a .torrent file</p>
-              <div id="wan-receive-status" style="display:none;" class="wan-receive-status">
-                <div class="wan-receive-header">
-                  <span id="wan-receive-filename">Fetching metadata...</span>
-                  <button id="wan-cancel-receive-btn" class="wan-small-btn danger">✕ Cancel</button>
+
+              <!-- WebRTC reply step (only shown if code is E1~) -->
+              <div id="rtc-step2-recv" style="display:none;margin-top:0.5rem;">
+                <div class="rtc-step">
+                  <div class="rtc-step-num">2</div>
+                  <div class="rtc-step-body">
+                    <div class="rtc-step-label">Send this reply code back to your friend</div>
+                    <div class="link-display">
+                      <input type="text" id="rtc-answer-out" readonly placeholder="Generating…">
+                      <button class="copy-btn" data-target="rtc-answer-out">Copy</button>
+                    </div>
+                  </div>
                 </div>
+              </div>
+
+              <div id="wan-recv-progress" style="display:none;margin-top:0.75rem;">
                 <div class="wan-send-status">
-                  <span class="status-dot pulsing"></span>
-                  <span id="wan-receive-status-text">Connecting to peer...</span>
-                  <span id="wan-receive-peers" class="wan-peers-badge">0 peers</span>
+                  <span class="status-dot pulsing" id="wan-recv-dot"></span>
+                  <span id="wan-recv-status">Connecting…</span>
                 </div>
+                <div class="rtc-file-pill" id="wan-recv-filepill" style="display:none;margin:0.4rem 0;"></div>
                 <div class="wan-progress-bar-wrap">
-                  <div class="progress-bar"><div class="progress-fill" id="wan-receive-progress-fill" style="width:0%"></div></div>
-                  <span id="wan-receive-progress-text">0%</span>
+                  <div class="progress-bar"><div class="progress-fill" id="wan-recv-fill" style="width:0%"></div></div>
+                  <span id="wan-recv-pct">0%</span>
                 </div>
               </div>
             </div>
 
-          </div>
+          </div><!-- /wan-panel -->
         </div>
       </div>
+
 
       <!-- Torrents Mode -->
       <div class="mode-container" id="torrents-container" style="display: none;">

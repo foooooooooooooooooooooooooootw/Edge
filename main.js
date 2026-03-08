@@ -3,6 +3,11 @@ const path = require('path');
 const fs = require('fs');
 const NetworkManager = require('./network-manager');
 const WANManager = require('./wan-manager');
+const { UPnPTransfer } = require('./upnp-transfer');
+
+// ── WebRTC file I/O helpers ──────────────────────────────────
+const rtcWrites = new Map(); // name → {stream, finalPath}
+
 
 let mainWindow, networkManager, wanManager;
 
@@ -28,6 +33,7 @@ app.whenReady().then(() => {
   networkManager.on('transfer-progress', d => mainWindow.webContents.send('transfer-progress', d));
   networkManager.on('transfer-complete', d => mainWindow.webContents.send('transfer-complete', d));
   networkManager.on('message-received', d => mainWindow.webContents.send('message-received', d));
+  networkManager.on('typing-received',   d => mainWindow.webContents.send('typing-received', d));
 
   networkManager.on('file-incoming', async (data) => {
     // Guard: ignore malformed events with no filename (e.g. stray message-type packets)
@@ -129,8 +135,12 @@ ipcMain.handle('send-file', async (e, { peerId, filePath, thumbnail, message }) 
   if (thumbnail) networkManager.setPendingThumbnail(filePath, thumbnail);
   return networkManager.sendFile(peerId, filePath, message);
 });
-ipcMain.handle('send-message', async (e, { peerId, message }) => {
-  try { await networkManager.sendMessage(peerId, message); return { success: true }; }
+ipcMain.handle('send-typing', async (e, { peerId, isTyping }) => {
+  try { await networkManager.sendTyping(peerId, isTyping); } catch {}
+  return true;
+});
+ipcMain.handle('send-message', async (e, { peerId, message, reply }) => {
+  try { await networkManager.sendMessage(peerId, message, reply || null); return { success: true }; }
   catch (err) { return { success: false, error: err.message }; }
 });
 ipcMain.handle('set-username', async (e, username) => { networkManager.setUsername(username); return true; });
@@ -158,6 +168,89 @@ ipcMain.handle('open-file', async (e, { filePath }) => {
   catch (err) { return { success: false, error: err.message }; }
 });
 ipcMain.handle('show-in-folder', async (e, { filePath }) => { const { shell } = require('electron'); shell.showItemInFolder(filePath); return { success: true }; });
+
+// ==================== WebRTC I/O IPC ====================
+ipcMain.handle('rtc-read-chunk', async (_e, { filePath, offset, size }) => {
+  const fh  = await fs.promises.open(filePath, 'r');
+  const buf = Buffer.alloc(size);
+  await fh.read(buf, 0, size, offset);
+  await fh.close();
+  return buf; // Electron serialises Buffers over IPC fine
+});
+
+ipcMain.handle('rtc-write-chunk', async (_e, { name, chunk }) => {
+  if (!rtcWrites.has(name)) {
+    const base  = path.join(app.getPath('downloads'), name);
+    const final = fs.existsSync(base)
+      ? path.join(app.getPath('downloads'), `${Date.now()}_${name}`)
+      : base;
+    rtcWrites.set(name, { stream: fs.createWriteStream(final), finalPath: final });
+  }
+  const { stream } = rtcWrites.get(name);
+  await new Promise((ok, fail) => stream.write(Buffer.from(chunk), e => e ? fail(e) : ok()));
+  return { ok: true };
+});
+
+ipcMain.handle('rtc-file-complete', async (_e, { name }) => {
+  const entry = rtcWrites.get(name);
+  if (entry) {
+    await new Promise(ok => entry.stream.end(ok));
+    rtcWrites.delete(name);
+    mainWindow?.webContents.send('rtc-saved', { name, filePath: entry.finalPath });
+  }
+  return { ok: true };
+});
+
+// ==================== UPnP Transfer IPC ====================
+let upnpTransfer = null;
+
+ipcMain.handle('upnp-send-init', async (_e, { filePath }) => {
+  try {
+    upnpTransfer = new UPnPTransfer();
+
+    upnpTransfer.on('progress', d => mainWindow?.webContents.send('upnp-progress', d));
+    upnpTransfer.on('connected', () => mainWindow?.webContents.send('upnp-connected'));
+    upnpTransfer.on('done',      d => mainWindow?.webContents.send('upnp-done', d));
+    upnpTransfer.on('error',     e => mainWindow?.webContents.send('upnp-error', { message: e.message }));
+    upnpTransfer.on('declined',  () => mainWindow?.webContents.send('upnp-error', { message: 'Transfer declined by receiver' }));
+
+    const code = await upnpTransfer.initSend(filePath);
+    return { success: true, code };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('upnp-send-cancel', async () => {
+  try { await upnpTransfer?.cleanup(); } catch {}
+  upnpTransfer = null;
+  return { success: true };
+});
+
+ipcMain.handle('upnp-receive-init', async (_e, { code }) => {
+  try {
+    const saveResult = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose Download Folder', properties: ['openDirectory'], buttonLabel: 'Save Here'
+    });
+    if (saveResult.canceled) return { success: false, canceled: true };
+    const savePath = saveResult.filePaths[0];
+
+    upnpTransfer = new UPnPTransfer();
+    upnpTransfer.on('progress',     d => mainWindow?.webContents.send('upnp-progress', d));
+    upnpTransfer.on('connected',    () => mainWindow?.webContents.send('upnp-connected'));
+    upnpTransfer.on('receiveStart', d => mainWindow?.webContents.send('upnp-receive-start', d));
+    upnpTransfer.on('done',         d => mainWindow?.webContents.send('upnp-done', d));
+    upnpTransfer.on('error',        e => mainWindow?.webContents.send('upnp-error', { message: e.message }));
+
+    // Kick off async — main resolves immediately with savePath
+    upnpTransfer.initReceive(code, savePath).catch(err =>
+      mainWindow?.webContents.send('upnp-error', { message: err.message })
+    );
+    return { success: true, savePath };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
 
 // ==================== WAN IPC ====================
 ipcMain.handle('wan-send-private', async (e, { filePath }) => {

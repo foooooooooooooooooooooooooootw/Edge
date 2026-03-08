@@ -180,20 +180,20 @@ h1 svg {
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  background: #2a2a2a;
-  border: 1px solid #444;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--text) 15%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition: all 0.2s;
-  color: #888;
+  color: color-mix(in srgb, var(--text) 50%, transparent);
 }
 
 #settings-btn:hover {
-  background: #333;
-  border-color: #4a9eff;
-  color: #4a9eff;
+  background: var(--accent-dim);
+  border-color: var(--accent-border);
+  color: var(--accent);
 }
 
 /* Modal */
@@ -718,7 +718,8 @@ main {
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  background: #333;
+  background: color-mix(in srgb, var(--accent) 15%, var(--surface));
+  border: 1.5px solid var(--accent-border);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -728,7 +729,7 @@ main {
 .peer-avatar-placeholder svg {
   width: 20px;
   height: 20px;
-  color: #666;
+  color: var(--accent);
 }
 
 .peer-info {
@@ -822,8 +823,8 @@ main {
 
 /* Chat Header */
 .chat-header {
-  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
-  border-bottom: 1px solid var(--accent-border);
+  background: var(--surface);
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
   padding: 1rem 1.5rem;
   display: flex;
   align-items: center;
@@ -889,8 +890,8 @@ main {
   flex: 1;
   overflow-y: auto;
   padding: 1.5rem;
-  background: var(--bg);
-  background: #1a1a1a;
+  /* Subtle accent wash on the chat log background */
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg));
 }
 
 .messages-list {
@@ -1018,6 +1019,7 @@ main {
   flex-direction: column;
   gap: 0.5rem;
   max-width: 70%;
+  overflow: visible;
 }
 
 .chat-message.sent .message-content {
@@ -1041,29 +1043,79 @@ main {
   font-size: 0.75rem;
 }
 
+/* ── Speech bubble tails ── */
+/* Received (left side): tail points left */
+.message-text,
+.message-text-only,
+.message-file {
+  position: relative;
+}
+
 .message-text {
   background: color-mix(in srgb, var(--text) 8%, var(--bg));
   padding: 0.75rem;
-  border-radius: 12px;
+  border-radius: 0 12px 12px 12px;  /* flat top-left = where tail attaches */
   color: var(--text);
   word-wrap: break-word;
+}
+
+/* Received tail */
+.chat-message:not(.sent) .message-text::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -7px;
+  width: 0; height: 0;
+  border-top: 7px solid color-mix(in srgb, var(--text) 8%, var(--bg));
+  border-left: 7px solid transparent;
 }
 
 .chat-message.sent .message-text {
   background: color-mix(in srgb, var(--text) 13%, var(--surface));
   border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  border-radius: 12px 0 12px 12px;  /* flat top-right = where tail attaches */
+}
+
+/* Sent tail */
+.chat-message.sent .message-text::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  right: -7px;
+  left: auto;
+  width: 0; height: 0;
+  border-top: 7px solid color-mix(in srgb, var(--text) 13%, var(--surface));
+  border-right: 7px solid transparent;
 }
 
 .message-file {
   background: color-mix(in srgb, var(--text) 6%, var(--bg));
   border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
-  border-radius: 12px;
+  border-radius: 0 12px 12px 12px;
   padding: 0.75rem;
   display: flex;
   gap: 0.75rem;
   align-items: center;
   cursor: pointer;
   transition: background 0.2s;
+  position: relative;
+}
+
+.chat-message:not(.sent) .message-file::before {
+  content: '';
+  position: absolute;
+  top: -1px; left: -7px;
+  width: 0; height: 0;
+  border-top: 7px solid color-mix(in srgb, var(--text) 12%, transparent);
+  border-left: 7px solid transparent;
+}
+.chat-message:not(.sent) .message-file::after {
+  content: '';
+  position: absolute;
+  top: 0; left: -6px;
+  width: 0; height: 0;
+  border-top: 6px solid color-mix(in srgb, var(--text) 6%, var(--bg));
+  border-left: 6px solid transparent;
 }
 
 .message-file:hover {
@@ -1073,6 +1125,24 @@ main {
 .chat-message.sent .message-file {
   background: color-mix(in srgb, var(--text) 10%, var(--surface));
   border-color: color-mix(in srgb, var(--text) 14%, transparent);
+  border-radius: 12px 0 12px 12px;
+}
+
+.chat-message.sent .message-file::before {
+  content: '';
+  position: absolute;
+  top: -1px; right: -7px; left: auto;
+  width: 0; height: 0;
+  border-top: 7px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-right: 7px solid transparent;
+}
+.chat-message.sent .message-file::after {
+  content: '';
+  position: absolute;
+  top: 0; right: -6px; left: auto;
+  width: 0; height: 0;
+  border-top: 6px solid color-mix(in srgb, var(--text) 10%, var(--surface));
+  border-right: 6px solid transparent;
 }
 
 .file-thumbnail {
@@ -1159,20 +1229,20 @@ main {
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  background: #2a2a2a;
-  border: 1px solid #444;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--text) 15%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition: all 0.2s;
-  color: #888;
+  color: color-mix(in srgb, var(--text) 50%, transparent);
 }
 
 #attach-btn:hover {
-  background: #333;
-  border-color: #4a9eff;
-  color: #4a9eff;
+  background: var(--accent-dim);
+  border-color: var(--accent-border);
+  color: var(--accent);
 }
 
 .incoming-list {
@@ -1468,8 +1538,8 @@ input:focus, textarea:focus { outline: 1px solid var(--accent) !important; borde
 #message-input:focus  { border-color: var(--accent) !important; }
 
 /* Chat bubbles */
-.chat-message.sent .message-text-only  { background: color-mix(in srgb, var(--text) 13%, var(--surface)) !important; border: 1px solid color-mix(in srgb, var(--text) 12%, transparent) !important; }
-.chat-message.sent .message-file       { background: color-mix(in srgb, var(--text) 10%, var(--surface)) !important; border-color: color-mix(in srgb, var(--text) 14%, transparent) !important; }
+/* sent .message-text-only styling handled above in bubble section */
+/* sent .message-file handled in bubble section above */
 
 /* ============================================================
    THEME SETTINGS PANEL
@@ -1544,8 +1614,8 @@ input:focus, textarea:focus { outline: 1px solid var(--accent) !important; borde
    CHAT — text-only messages & clickable files
    ============================================================ */
 .message-text-only {
-  background: #2a2a2a;
-  border-radius: 12px;
+  background: color-mix(in srgb, var(--text) 8%, var(--bg));
+  border-radius: 0 12px 12px 12px;  /* received: flat top-left */
   padding: 0.55rem 0.85rem;
   display: inline-block;
   max-width: 100%;
@@ -1553,6 +1623,33 @@ input:focus, textarea:focus { outline: 1px solid var(--accent) !important; borde
   line-height: 1.5;
   user-select: text;
   cursor: text;
+  position: relative;
+}
+
+/* Received text-only tail */
+.chat-message:not(.sent) .message-text-only::before {
+  content: '';
+  position: absolute;
+  top: 0; left: -7px;
+  width: 0; height: 0;
+  border-top: 7px solid color-mix(in srgb, var(--text) 8%, var(--bg));
+  border-left: 7px solid transparent;
+}
+
+/* Sent text-only */
+.chat-message.sent .message-text-only {
+  border-radius: 12px 0 12px 12px !important;  /* flat top-right */
+  background: color-mix(in srgb, var(--text) 13%, var(--surface)) !important;
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent) !important;
+}
+
+.chat-message.sent .message-text-only::before {
+  content: '';
+  position: absolute;
+  top: -1px; right: -7px; left: auto;
+  width: 0; height: 0;
+  border-top: 7px solid color-mix(in srgb, var(--text) 13%, var(--surface));
+  border-right: 7px solid transparent;
 }
 .message-file-clickable {
   cursor: pointer;
@@ -1966,14 +2063,14 @@ input:focus, textarea:focus { outline: 1px solid var(--accent) !important; borde
 #username-input { background: var(--bg) !important; color: var(--text) !important; border-color: var(--accent) !important; }
 
 /* Chat center/background fully themed */
-.chat-area, .chat-messages, #chat-messages { background: var(--bg) !important; }
+.chat-area { background: var(--bg) !important; }
+.chat-messages, #chat-messages { background: color-mix(in srgb, var(--accent) 4%, var(--bg)) !important; }
+.messages-container { background: color-mix(in srgb, var(--accent) 4%, var(--bg)) !important; }
 
 /* Tracker textarea in settings */
 #tracker-list-input { background: var(--bg) !important; color: var(--text) !important; border-color: color-mix(in srgb, var(--text) 15%, transparent) !important; }
 #tracker-list-input:focus { border-color: var(--accent) !important; }
 
-/* Chat header accent tint (must override surface !important rule) */
-.chat-header { background: color-mix(in srgb, var(--accent) 12%, var(--surface)) !important; border-bottom: 1px solid var(--accent-border) !important; }
 
 /* ============================================================
    CUSTOM TITLE BAR
@@ -2026,3 +2123,277 @@ input:focus, textarea:focus { outline: 1px solid var(--accent) !important; borde
 /* Shrink container to fill remaining height below titlebar */
 body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 .container { flex: 1; min-height: 0; }
+
+/* ============================================================
+   UNREAD BADGE + TYPING INDICATOR
+   ============================================================ */
+.unread-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  margin-left: 0.4rem;
+  vertical-align: middle;
+  line-height: 1;
+}
+
+#typing-indicator {
+  padding: 0.3rem 1.5rem 0;
+  font-size: 0.78rem;
+  color: color-mix(in srgb, var(--text) 45%, transparent);
+  min-height: 1.4rem;
+  font-style: italic;
+  transition: opacity 0.2s;
+  flex-shrink: 0;
+}
+
+/* ============================================================
+   SEND BUTTON
+   ============================================================ */
+#send-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #fff;
+  flex-shrink: 0;
+  transition: filter 0.15s, transform 0.1s;
+}
+#send-btn:hover  { filter: brightness(1.15); }
+#send-btn:active { transform: scale(0.93); }
+#send-btn:disabled { opacity: 0.35; cursor: default; }
+
+/* ============================================================
+   WebRTC CODE EXCHANGE UI
+   ============================================================ */
+.rtc-step {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  align-items: flex-start;
+}
+
+.rtc-step-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.rtc-step-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.rtc-step-label {
+  font-size: 0.82rem;
+  color: color-mix(in srgb, var(--text) 65%, transparent);
+  margin-bottom: 0.35rem;
+}
+
+.rtc-step-hint {
+  font-size: 0.75rem;
+  color: color-mix(in srgb, var(--text) 40%, transparent);
+  margin-top: 0.3rem;
+  font-style: italic;
+}
+
+.rtc-file-pill {
+  display: inline-block;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  border: 1px solid var(--accent-border);
+  border-radius: 20px;
+  padding: 0.2rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text);
+  margin-bottom: 0.5rem;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Markdown message formatting ─────────────────────────── */
+.message-text code.md-code,
+.message-text-only code.md-code {
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.85em;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+  color: var(--text);
+}
+
+.message-text pre.md-codeblock,
+.message-text-only pre.md-codeblock {
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.82em;
+  background: color-mix(in srgb, var(--bg) 60%, #000);
+  border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
+  border-radius: 6px;
+  padding: 0.6em 0.8em;
+  margin: 0.4em 0 0 0;
+  white-space: pre;
+  overflow-x: auto;
+  max-width: 100%;
+  display: block;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.message-text pre.md-codeblock .md-lang,
+.message-text-only pre.md-codeblock .md-lang {
+  display: block;
+  font-size: 0.75em;
+  color: color-mix(in srgb, var(--accent) 70%, var(--text));
+  margin-bottom: 0.3em;
+  font-style: normal;
+}
+
+.message-text strong, .message-text-only strong { font-weight: 700; }
+.message-text em,     .message-text-only em     { font-style: italic; }
+.message-text del,    .message-text-only del     { text-decoration: line-through; opacity: 0.7; }
+
+/* ── Reply bar ───────────────────────────────────────────── */
+#reply-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  border-top: 1px solid var(--accent-border);
+  border-left: 3px solid var(--accent);
+  font-size: 0.82rem;
+}
+#reply-bar-inner { flex: 1; min-width: 0; }
+#reply-bar-label { color: color-mix(in srgb, var(--text) 55%, transparent); margin-bottom: 0.1rem; }
+#reply-bar-label strong { color: var(--accent); }
+#reply-bar-preview {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+#reply-bar-cancel {
+  background: none;
+  border: none;
+  color: color-mix(in srgb, var(--text) 45%, transparent);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+#reply-bar-cancel:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+
+/* ── Reply quote inside message ─────────────────────────── */
+.reply-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.3rem 0.6rem;
+  margin-bottom: 0.3rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  font-size: 0.8rem;
+  max-width: 100%;
+  overflow: hidden;
+}
+.reply-quote-sender {
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+.reply-quote-text {
+  color: color-mix(in srgb, var(--text) 70%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Textarea input ─────────────────────────────────────── */
+.input-wrap {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+#message-input {
+  width: 100%;
+  resize: none;
+  min-height: 36px;
+  max-height: 120px;
+  line-height: 1.4;
+  overflow-y: auto;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* ── Markdown preview pane ──────────────────────────────── */
+.message-preview {
+  min-height: 36px;
+  max-height: 120px;
+  overflow-y: auto;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  cursor: text;
+}
+
+/* ── Preview toggle button ──────────────────────────────── */
+.preview-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.3rem;
+  cursor: pointer;
+  color: color-mix(in srgb, var(--text) 45%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color 0.15s, border-color 0.15s;
+}
+.preview-btn:hover { color: var(--text); border-color: var(--accent-border); }
+.preview-btn.active { color: var(--accent); border-color: var(--accent); }
+
+/* ── WAN notice banner ──────────────────────────────────── */
+.wan-notice {
+  font-size: 0.8rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: 6px;
+  margin-bottom: 0.5rem;
+  line-height: 1.4;
+}
+.wan-notice.warn {
+  background: color-mix(in srgb, #f59e0b 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, #f59e0b 35%, transparent);
+  color: color-mix(in srgb, #f59e0b 80%, var(--text));
+}

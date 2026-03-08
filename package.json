@@ -1,6 +1,6 @@
 {
   "name": "edge-fileshare",
-  "version": "1.35.0",
+  "version": "1.46.0",
   "description": "Edge \u2014 P2P file sharing",
   "main": "main.js",
   "author": "foooooooooooooooooooooooooootw",
@@ -30,13 +30,25 @@
       "styles.css",
       "renderer.js",
       "package.json",
-      "node_modules/**/*"
+      "node_modules/**/*",
+      "upnp-client.js",
+      "upnp-transfer.js"
     ],
     "compression": "normal",
     "win": {
       "target": [
-        "portable",
-        "nsis"
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "mac": {

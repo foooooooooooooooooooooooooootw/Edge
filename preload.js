@@ -3,12 +3,32 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   // LAN
   getPeers: () => ipcRenderer.invoke('get-peers'),
+  // UPnP transfer
+  upnpSendInit:    (filePath) => ipcRenderer.invoke('upnp-send-init', { filePath }),
+  upnpSendCancel:  ()         => ipcRenderer.invoke('upnp-send-cancel'),
+  upnpReceiveInit: (code)     => ipcRenderer.invoke('upnp-receive-init', { code }),
+  onUpnpProgress:     (cb) => ipcRenderer.on('upnp-progress',       (_e, d) => cb(d)),
+  onUpnpConnected:    (cb) => ipcRenderer.on('upnp-connected',       ()      => cb()),
+  onUpnpReceiveStart: (cb) => ipcRenderer.on('upnp-receive-start',   (_e, d) => cb(d)),
+  onUpnpDone:         (cb) => ipcRenderer.on('upnp-done',            (_e, d) => cb(d)),
+  onUpnpError:        (cb) => ipcRenderer.on('upnp-error',           (_e, d) => cb(d)),
+  // WebRTC file I/O
+  rtcReadChunk:   (filePath, offset, size) => ipcRenderer.invoke('rtc-read-chunk', { filePath, offset, size }),
+  rtcWriteChunk:  (fileName, chunk) => ipcRenderer.invoke('rtc-write-chunk', { fileName, chunk }),
+  rtcFileComplete:(fileName) => ipcRenderer.invoke('rtc-file-complete', { fileName }),
+  onRtcFileSaved: (cb) => ipcRenderer.on('rtc-file-saved', (e, d) => cb(d)),
+  // WebRTC file I/O
+  rtcReadChunk:    (filePath, offset, size) => ipcRenderer.invoke('rtc-read-chunk', { filePath, offset, size }),
+  rtcWriteChunk:   (name, chunk)            => ipcRenderer.invoke('rtc-write-chunk', { name, chunk }),
+  rtcFileComplete: (name)                   => ipcRenderer.invoke('rtc-file-complete', { name }),
+  onRtcSaved:      (cb) => ipcRenderer.on('rtc-saved', (_e, d) => cb(d)),
   windowMinimize:    () => ipcRenderer.send('window-minimize'),
   windowMaximize:    () => ipcRenderer.send('window-maximize'),
   windowClose:       () => ipcRenderer.send('window-close'),
   windowIsMaximized: () => ipcRenderer.invoke('window-is-maximized'),
+  sendTyping: (peerId, isTyping) => ipcRenderer.invoke('send-typing', { peerId, isTyping }),
   sendFile: (peerId, filePath, message, thumbnail) => ipcRenderer.invoke('send-file', { peerId, filePath, message, thumbnail }),
-  sendMessage: (peerId, message) => ipcRenderer.invoke('send-message', { peerId, message }),
+  sendMessage: (peerId, message, reply) => ipcRenderer.invoke('send-message', { peerId, message, reply }),
   setUsername: (username) => ipcRenderer.invoke('set-username', username),
   setAvatar: (base64Image) => ipcRenderer.invoke('set-avatar', base64Image),
   getUserInfo: () => ipcRenderer.invoke('get-user-info'),
@@ -55,6 +75,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onFileIncoming: (cb) => ipcRenderer.on('file-incoming', (e, d) => cb(d)),
   onFileIncomingAccepted: (cb) => ipcRenderer.on('file-incoming-accepted', (e, d) => cb(d)),
   onTransferCompleteIncoming: (cb) => ipcRenderer.on('transfer-complete-incoming', (e, d) => cb(d)),
+  onTypingReceived: (cb) => ipcRenderer.on('typing-received', (e, d) => cb(d)),
   onMessageReceived: (cb) => ipcRenderer.on('message-received', (e, d) => cb(d)),
 
   // WAN Events

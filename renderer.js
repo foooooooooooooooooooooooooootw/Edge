@@ -1,3 +1,299 @@
+// ── WebRTC transfer (inlined from rtc-transfer.js) ──────────
+/**
+ * rtc-transfer.js — WebRTC DataChannel file transfer
+ * Pure browser JS (no Node/Buffer). Renderer process only.
+ *
+ * Code format:  E1~<b62(JSON)>
+ * JSON: { u, p, f, c }  (ufrag, pwd, fingerprint-hex-no-colons, candidates["ip:port"])
+ * Typical code length: ~130-160 chars
+ */
+
+// ── Base62 ────────────────────────────────────────────────────
+const _B62 = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+function b62Enc(u8) {
+  if (!u8.length) return '0';
+  let n = 0n;
+  for (const b of u8) n = (n << 8n) | BigInt(b);
+  if (n === 0n) return '0';
+  let s = '';
+  while (n > 0n) { s = _B62[Number(n % 62n)] + s; n /= 62n; }
+  return s;
+}
+
+function b62Dec(s) {
+  let n = 0n;
+  for (const c of s) {
+    const i = _B62.indexOf(c);
+    if (i < 0) throw new Error('Invalid character in transfer code: ' + JSON.stringify(c));
+    n = n * 62n + BigInt(i);
+  }
+  if (n === 0n) return new Uint8Array(0);
+  let hex = n.toString(16);
+  if (hex.length % 2) hex = '0' + hex;
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i*2, i*2+2), 16);
+  return out;
+}
+
+// ── Code encode / decode ──────────────────────────────────────
+function encodeCode(ufrag, pwd, fpWithColons, candidates) {
+  const fpHex = fpWithColons.replace(/:/g, '').toUpperCase();
+  const srflx = candidates.filter(c => c.type === 'srflx');
+  const host  = candidates.filter(c => c.type === 'host' && !c.address.includes(':'));
+  const picked = [...srflx, ...host].slice(0, 2).map(c => c.address + ':' + c.port);
+  const bytes = new TextEncoder().encode(JSON.stringify({ u: ufrag, p: pwd, f: fpHex, c: picked }));
+  return 'E1~' + b62Enc(bytes);
+}
+
+function decodeCode(raw) {
+  const s = raw.trim();
+  if (!s.startsWith('E1~')) throw new Error('Not an Edge transfer code (should start with E1~)');
+  const { u, p, f, c } = JSON.parse(new TextDecoder().decode(b62Dec(s.slice(3))));
+  const fp = f.toUpperCase().match(/.{2}/g).join(':');
+  const candidates = (c || []).map(addr => {
+    const i = addr.lastIndexOf(':');
+    return { address: addr.slice(0, i), port: parseInt(addr.slice(i + 1)) };
+  });
+  return { ufrag: u, pwd: p, fp, candidates };
+}
+
+// ── SDP helpers ───────────────────────────────────────────────
+// Wait for ICE gathering to complete on an already-described PC.
+// Must be called AFTER setLocalDescription.
+function waitForICE(pc, ms = 5000) {
+  return new Promise(resolve => {
+    console.log('[RTC] waitForICE start, state:', pc.iceGatheringState);
+    if (pc.iceGatheringState === 'complete') { console.log('[RTC] already complete'); resolve(); return; }
+    const done = () => { console.log('[RTC] ICE gather done, state:', pc.iceGatheringState); resolve(); };
+    const timer = setTimeout(() => { console.log('[RTC] ICE gather TIMEOUT after', ms, 'ms, state:', pc.iceGatheringState); done(); }, ms);
+    pc.onicegatheringstatechange = () => {
+      console.log('[RTC] iceGatheringState ->', pc.iceGatheringState);
+      if (pc.iceGatheringState === 'complete') { clearTimeout(timer); done(); }
+    };
+  });
+}
+
+function extractCredentials(sdp) {
+  const ufrag = sdp.match(/a=ice-ufrag:(\S+)/)?.[1];
+  const pwd   = sdp.match(/a=ice-pwd:(\S+)/)?.[1];
+  const fp    = sdp.match(/a=fingerprint:sha-256 (\S+)/i)?.[1];
+  return { ufrag, pwd, fp };
+}
+
+// Parse all candidates from a final (gathered) SDP
+function parseSdpCandidates(sdp) {
+  const out = [];
+  for (const line of sdp.split(/\r?\n/)) {
+    if (!line.startsWith('a=candidate:')) continue;
+    const m = line.match(/a=candidate:\S+ \d+ \S+ \d+ (\S+) (\d+) typ (\S+)/);
+    if (m) out.push({ address: m[1], port: parseInt(m[2]), type: m[3] });
+  }
+  return out;
+}
+
+// A valid minimal offer SDP Chrome will accept (has BUNDLE, extmap-allow-mixed, etc.)
+function makeOfferSDP(ufrag, pwd, fp) {
+  return [
+    'v=0',
+    'o=- 1 2 IN IP4 127.0.0.1',
+    's=-',
+    't=0 0',
+    'a=group:BUNDLE 0',
+    'a=extmap-allow-mixed',
+    'a=msid-semantic: WMS',
+    'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
+    'c=IN IP4 0.0.0.0',
+    'a=ice-ufrag:' + ufrag,
+    'a=ice-pwd:' + pwd,
+    'a=ice-options:trickle',
+    'a=fingerprint:sha-256 ' + fp,
+    'a=setup:actpass',
+    'a=mid:0',
+    'a=sctp-port:5000',
+    'a=max-message-size:262144',
+  ].join('\r\n') + '\r\n';
+}
+
+// Add remote ICE candidates (called after BOTH descriptions are set)
+async function addRemoteCandidates(pc, candidates) {
+  for (const c of candidates) {
+    try {
+      const priv = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.)/.test(c.address);
+      const type = priv ? 'host' : 'srflx';
+      const line = `candidate:0 1 UDP 1 ${c.address} ${c.port} typ ${type}` +
+        (type === 'srflx' ? ' raddr 0.0.0.0 rport 0' : '');
+      await pc.addIceCandidate(new RTCIceCandidate({ candidate: line, sdpMid: '0', sdpMLineIndex: 0 }));
+    } catch (_) {}
+  }
+}
+
+// ── Constants ─────────────────────────────────────────────────
+const CHUNK    = 65536;
+const BUF_HIGH = 2 * 1024 * 1024;
+const STUN = { iceServers: [
+  { urls: 'stun:stun.l.google.com:19302'  },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+]};
+
+// ── RTCTransfer ───────────────────────────────────────────────
+class RTCTransfer {
+  constructor() {
+    this._pc = null; this._dc = null;
+    this._fileMeta = null; this._handlers = {};
+  }
+  on(e, fn) { this._handlers[e] = fn; return this; }
+  _emit(e, ...a) { this._handlers[e]?.(...a); }
+
+  // ── SENDER step 1 ─────────────────────────────────────────
+  async initSend(fileMeta) {
+    this._fileMeta = fileMeta;
+    const pc = this._makePC();
+
+    // DataChannel must exist before createOffer
+    const dc = pc.createDataChannel('f', { ordered: true });
+    this._dc = dc;
+    dc.binaryType = 'arraybuffer';
+    dc.onopen  = () => this._runSend();
+    dc.onclose = () => this._emit('disconnected');
+    dc.onerror = e => this._emit('error', new Error(String(e.error ?? 'channel error')));
+
+    // 1. Create offer + set local description
+    console.log("[RTC] sender: createOffer...");
+    await pc.setLocalDescription(await pc.createOffer());
+    console.log("[RTC] sender: localDesc set, iceGatheringState:", pc.iceGatheringState);
+
+    // 2. Wait for ICE gathering (happens automatically after setLocalDescription)
+    await waitForICE(pc);
+    console.log("[RTC] sender: ICE gathered");
+
+    // 3. Extract everything from the final gathered SDP
+    const sdp = pc.localDescription.sdp;
+    const { ufrag, pwd, fp } = extractCredentials(sdp);
+    if (!ufrag || !pwd || !fp) throw new Error('Could not read ICE credentials');
+    const candidates = parseSdpCandidates(sdp);
+    return encodeCode(ufrag, pwd, fp, candidates);
+  }
+
+  // ── SENDER step 2 ─────────────────────────────────────────
+  async acceptAnswer(answerCode) {
+    const { ufrag, pwd, fp, candidates } = decodeCode(answerCode);
+    const pc = this._pc;
+
+    // Patch our local SDP into a valid answer by swapping remote credentials
+    const remoteSDP = pc.localDescription.sdp
+      .replace(/a=ice-ufrag:\S+/g, 'a=ice-ufrag:' + ufrag)
+      .replace(/a=ice-pwd:\S+/g,   'a=ice-pwd:'   + pwd)
+      .replace(/a=fingerprint:sha-256 \S+/gi, 'a=fingerprint:sha-256 ' + fp)
+      .replace(/a=setup:\S+/g, 'a=setup:active');
+
+    await pc.setRemoteDescription({ type: 'answer', sdp: remoteSDP });
+    await addRemoteCandidates(pc, candidates);
+  }
+
+  // ── RECEIVER step 1 ───────────────────────────────────────
+  async initReceive(offerCode) {
+    console.log("[RTC] initReceive, code length:", offerCode?.length);
+    let decoded;
+    try { decoded = decodeCode(offerCode); } catch(e) { console.error("[RTC] decodeCode failed:", e); throw e; }
+    const { ufrag, pwd, fp, candidates } = decoded;
+    console.log("[RTC] decoded: ufrag=" + ufrag + " candidates=" + candidates.length);
+    const pc = this._makePC();
+
+    pc.ondatachannel = e => {
+      this._dc = e.channel;
+      this._dc.binaryType = 'arraybuffer';
+      this._setupRecv();
+    };
+
+    // 1. Build synthetic offer SDP and set as remote description
+    const offerSDP = makeOfferSDP(ufrag, pwd, fp);
+    console.log("[RTC] receiver: setRemoteDescription...");
+    await pc.setRemoteDescription({ type: 'offer', sdp: offerSDP });
+    console.log("[RTC] receiver: remoteDesc set");
+
+    // 2. Create answer + set local description
+    console.log("[RTC] receiver: createAnswer...");
+    await pc.setLocalDescription(await pc.createAnswer());
+    console.log("[RTC] receiver: localDesc set, iceGatheringState:", pc.iceGatheringState);
+
+    // 3. NOW add remote candidates (both descriptions are set)
+    await addRemoteCandidates(pc, candidates);
+    console.log("[RTC] receiver: remote candidates added");
+
+    // 4. Wait for our own ICE gathering to complete
+    await waitForICE(pc);
+    console.log("[RTC] receiver: ICE gathered");
+
+    // 5. Extract our answer credentials + candidates from final SDP
+    const sdp = pc.localDescription.sdp;
+    const { ufrag: au, pwd: ap, fp: af } = extractCredentials(sdp);
+    if (!au || !ap || !af) throw new Error('Could not read answer credentials');
+    const answerCandidates = parseSdpCandidates(sdp);
+    return encodeCode(au, ap, af, answerCandidates);
+  }
+
+  // ── Receive ────────────────────────────────────────────────
+  _setupRecv() {
+    let meta = null, received = 0;
+    this._dc.onmessage = async e => {
+      if (typeof e.data === 'string') { meta = JSON.parse(e.data); this._emit('receiveStart', meta); return; }
+      if (!meta) return;
+      const chunk = new Uint8Array(e.data);
+      received += chunk.byteLength;
+      await window.electronAPI.rtcWriteChunk(meta.name, chunk.buffer);
+      this._emit('progress', { received, total: meta.size, pct: meta.size ? received / meta.size * 100 : 0 });
+      if (received >= meta.size) {
+        await window.electronAPI.rtcFileComplete(meta.name);
+        this._emit('done', { name: meta.name, size: meta.size });
+        this.close();
+      }
+    };
+    this._dc.onerror = e => this._emit('error', new Error(String(e.error ?? 'recv error')));
+  }
+
+  // ── Send ───────────────────────────────────────────────────
+  async _runSend() {
+    const { path: fp, name, size } = this._fileMeta;
+    const dc = this._dc;
+    this._emit('sendStart', { name, size });
+    dc.send(JSON.stringify({ name, size }));
+    let offset = 0;
+    while (offset < size) {
+      while (dc.bufferedAmount > BUF_HIGH) {
+        await new Promise(r => setTimeout(r, 20));
+        if (dc.readyState !== 'open') return;
+      }
+      if (dc.readyState !== 'open') break;
+      const len = Math.min(CHUNK, size - offset);
+      const chunk = await window.electronAPI.rtcReadChunk(fp, offset, len);
+      dc.send(chunk);
+      offset += len;
+      this._emit('progress', { sent: offset, total: size, pct: size ? offset / size * 100 : 0 });
+    }
+  }
+
+  _makePC() {
+    try { this._pc?.close(); } catch {}
+    this._pc = new RTCPeerConnection(STUN);
+    this._pc.onconnectionstatechange = () => {
+      const s = this._pc?.connectionState;
+      if (s === 'connected') this._emit('connected');
+      if (s === 'disconnected' || s === 'failed') this._emit('disconnected');
+    };
+    return this._pc;
+  }
+
+  close() {
+    try { this._dc?.close(); } catch {}
+    try { this._pc?.close(); } catch {}
+    this._pc = this._dc = null;
+  }
+}
+
+// ── End WebRTC transfer ─────────────────────────────────────
+
 // State
 let peers = [];
 let selectedPeer = null;
@@ -8,13 +304,15 @@ let isRendering = false; // Prevent render loops
 let incomingSectionVisible = false; // Track if section is shown
 let currentMode = 'lan'; // 'lan', 'wan', 'torrents'
 let renderedMessageCount = 0;
-const sentThumbnailCache = new Map(); // filename -> dataURL
+const sentThumbnailCache = new Map();
+const unreadCounts = new Map();       // peerId -> unread count
+let typingTimeout = null;             // debounce for sending typing events
+let peerTyping = new Map();           // peerId -> timeout handle // filename -> dataURL
 const sentPathCache = new Map();      // filename -> local file path, for video lightbox
 
 // Edge Streak — counts consecutive files sent
 let edgeStreakCount = 0;
 let edgeStreakTimer = null;
-const STREAK_TIMEOUT_MS = 30000; // streak resets after 30s of inactivity
 
 // DOM Elements
 const peerList = document.getElementById('peer-list');
@@ -29,6 +327,13 @@ const avatarPlaceholder = document.getElementById('avatar-placeholder');
 const incomingList = document.getElementById('incoming-list');
 const chatMessages = document.getElementById('chat-messages');
 const messageInput = document.getElementById('message-input');
+const messagePreview = document.getElementById('message-preview');
+const previewBtn = document.getElementById('preview-btn');
+const replyBar = document.getElementById('reply-bar');
+const replyBarSender = document.getElementById('reply-bar-sender');
+const replyBarPreview = document.getElementById('reply-bar-preview');
+let replyingTo = null;  // { sender, text, type }  — set when replying
+let previewMode = false;
 const chatHeader = document.getElementById('chat-header');
 const messagesContainer = document.getElementById('messages-container');
 const attachBtn = document.getElementById('attach-btn');
@@ -132,19 +437,84 @@ function setupEventListeners() {
   });
 
   // Message input - send on Enter
-  messageInput.addEventListener('keypress', async (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      const msg = messageInput.value.trim();
-      if (msg && selectedPeer) {
-        messageInput.value = '';
-        try {
-          await window.electronAPI.sendMessage(selectedPeer.id, msg);
-          const userInfo = await window.electronAPI.getUserInfo();
-          appendMessage({ type: 'message', subtype: 'sent', message: msg, sender: userInfo.username, senderAvatar: userInfo.avatar, timestamp: new Date() });
-        } catch (err) { showNotification('Failed to send message', 'error'); }
-      }
+  // ── Textarea auto-resize ────────────────────────────────────
+  function resizeTextarea() {
+    messageInput.style.height = 'auto';
+    messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+  }
+
+  // ── Typing indicator + live markdown preview ─────────────────
+  messageInput.addEventListener('input', () => {
+    resizeTextarea();
+    if (previewMode) updatePreview();
+    if (!selectedPeer) return;
+    window.electronAPI.sendTyping(selectedPeer.id, true).catch(() => {});
+    clearTimeout(typingTimeout);
+    typingTimeout = setTimeout(() => {
+      if (selectedPeer) window.electronAPI.sendTyping(selectedPeer.id, false).catch(() => {});
+    }, 2000);
+  });
+
+  // ── Preview toggle ────────────────────────────────────────────
+  function updatePreview() {
+    messagePreview.innerHTML = renderMarkdown(messageInput.value) || '<span style="opacity:0.4">Nothing to preview</span>';
+  }
+  previewBtn?.addEventListener('click', () => {
+    previewMode = !previewMode;
+    previewBtn.classList.toggle('active', previewMode);
+    if (previewMode) {
+      updatePreview();
+      messagePreview.style.display = 'block';
+      messageInput.style.display   = 'none';
+    } else {
+      messagePreview.style.display = 'none';
+      messageInput.style.display   = 'block';
+      messageInput.focus();
     }
+  });
+
+  // ── Reply bar ────────────────────────────────────────────────
+  document.getElementById('reply-bar-cancel')?.addEventListener('click', clearReply);
+  function setReply(sender, text, type) {
+    replyingTo = { sender, text, type };
+    replyBarSender.textContent = sender;
+    replyBarPreview.innerHTML  = type === 'file'
+      ? `<span style="opacity:0.6">📎 ${escapeHtml(text)}</span>`
+      : renderMarkdown(text.slice(0, 120) + (text.length > 120 ? '…' : ''));
+    replyBar.style.display = 'flex';
+    if (previewMode) { previewMode = false; messagePreview.style.display='none'; messageInput.style.display='block'; previewBtn.classList.remove('active'); }
+    messageInput.focus();
+  }
+  function clearReply() {
+    replyingTo = null;
+    replyBar.style.display = 'none';
+  }
+  window._setReply = setReply; // expose for context menu handler
+
+  // ── Send ──────────────────────────────────────────────────────
+  const sendBtn = document.getElementById('send-btn');
+  const doSendMessage = async () => {
+    const msg = messageInput.value.trim();
+    if (!msg || !selectedPeer) return;
+    messageInput.value = '';
+    messageInput.style.height = 'auto';
+    // Exit preview mode after send
+    if (previewMode) { previewMode = false; messagePreview.style.display='none'; messageInput.style.display='block'; previewBtn.classList.remove('active'); }
+    const reply = replyingTo ? { ...replyingTo } : null;
+    clearReply();
+    clearTimeout(typingTimeout);
+    if (selectedPeer) window.electronAPI.sendTyping(selectedPeer.id, false).catch(() => {});
+    try {
+      const userInfo = await window.electronAPI.getUserInfo();
+      appendMessage({ type: 'message', subtype: 'sent', message: msg, reply, sender: userInfo.username, senderAvatar: userInfo.avatar, timestamp: new Date() });
+      await window.electronAPI.sendMessage(selectedPeer.id, msg, reply);
+    } catch(err) { showNotification('Failed to send message', 'error'); }
+  };
+  sendBtn?.addEventListener('click', doSendMessage);
+
+  messageInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSendMessage(); }
+    if (e.key === 'Escape') clearReply();
   });
 
   // Settings modal
@@ -208,8 +578,29 @@ function setupEventListeners() {
 function setupElectronListeners() {
   // Incoming text messages
   window.electronAPI.onMessageReceived((data) => {
-    appendMessage({ type: 'message', subtype: 'received', message: data.message, sender: data.sender || 'Unknown', senderAvatar: data.senderAvatar || null, timestamp: new Date() });
-    showNotification(`Message from ${data.sender}`, 'success');
+    const fromPeer = peers.find(p => p.ip === data.peerIp);
+    if (fromPeer && fromPeer.id !== selectedPeer?.id) {
+      unreadCounts.set(fromPeer.id, (unreadCounts.get(fromPeer.id) || 0) + 1);
+      renderPeers();
+      showNotification(`${data.sender}: ${data.message.substring(0, 40)}${data.message.length > 40 ? '…' : ''}`, 'success');
+    } else {
+      appendMessage({ type: 'message', subtype: 'received', message: data.message, reply: data.reply || null, sender: data.sender || 'Unknown', senderAvatar: data.senderAvatar || null, timestamp: new Date() });
+      showNotification(`Message from ${data.sender}`, 'success');
+    }
+  });
+
+  // Typing indicator
+  window.electronAPI.onTypingReceived && window.electronAPI.onTypingReceived((data) => {
+    const peer = peers.find(p => p.ip === data.peerIp);
+    if (peer?.id === selectedPeer?.id) {
+      showTypingIndicator(data.typing, data.sender);
+      clearTimeout(peerTyping.get(peer.id));
+      if (data.typing) {
+        peerTyping.set(peer.id, setTimeout(() => showTypingIndicator(false, ''), 4000));
+      }
+    } else if (peer && data.typing) {
+      // Increment unread for non-selected peers sending typing (just peer state tracking)
+    }
   });
 
   // Peer discovered
@@ -423,6 +814,11 @@ function switchMode(mode) {
   
 }
 
+function showTypingIndicator(isTyping, sender) {
+  const el = document.getElementById('typing-indicator');
+  if (el) el.textContent = isTyping ? `${sender} is typing…` : '';
+}
+
 function renderPeers() {
   peerCount.textContent = `${peers.length} online`;
   
@@ -461,6 +857,7 @@ function renderPeers() {
           <div class="peer-name">
             ${escapeHtml(displayName)}
             ${peer.nickname ? `<span class="peer-nickname">(${escapeHtml(peer.username)})</span>` : ''}
+            ${(unreadCounts.get(peer.id)||0) > 0 ? `<span class="unread-badge">${Math.min(unreadCounts.get(peer.id),99)}</span>` : ''}
           </div>
           <div class="peer-ip">${peer.ip}</div>
         </div>
@@ -484,6 +881,8 @@ function renderPeers() {
       }
       const peerId = item.dataset.peerId;
       selectedPeer = peers.find(p => p.id === peerId);
+      unreadCounts.delete(peerId);
+      showTypingIndicator(false, '');
       chatHistory = [];
       renderedMessageCount = 0;
       chatMessages.innerHTML = '<p id="chat-empty-msg" style="color:#666;text-align:center;padding:2rem;">No messages yet. Say hello!</p>';
@@ -594,7 +993,11 @@ async function handleFiles(files) {
       bumpEdgeStreak();
     } catch (err) {
       console.error('Error sending file:', err);
-      showNotification(`Failed to send ${file.name}: ${err.message}`, 'error');
+      if (err.message === 'declined') {
+        showNotification(`${file.name} — transfer declined`, 'error');
+      } else {
+        showNotification(`Failed to send ${file.name}: ${err.message}`, 'error');
+      }
     }
   }
 
@@ -874,11 +1277,21 @@ function buildMessageHTML(item) {
     : `<div class="message-avatar-placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg></div>`;
 
   if (item.type === 'message') {
+    const replyHtml = item.reply
+      ? `<div class="reply-quote">
+           <span class="reply-quote-sender">${escapeHtml(item.reply.sender)}</span>
+           <span class="reply-quote-text">${item.reply.type === 'file'
+             ? `📎 ${escapeHtml(item.reply.text)}`
+             : escapeHtml(item.reply.text.slice(0, 100) + (item.reply.text.length > 100 ? '…' : ''))
+           }</span>
+         </div>`
+      : '';
     return `<div class="chat-message ${isSent ? 'sent' : 'received'}">
       ${avatarHtml}
       <div class="message-content">
         <div class="message-header"><span class="message-sender">${escapeHtml(item.sender || '')}</span><span class="message-time">${formatTime(item.timestamp)}</span></div>
-        <div class="message-text message-text-only" data-text="${escapeAttr(item.message || '')}">${escapeHtml(item.message || '')}</div>
+        ${replyHtml}
+        <div class="message-text message-text-only" data-text="${escapeAttr(item.message || '')}">${renderMarkdown(item.message || '')}</div>
       </div></div>`;
   }
 
@@ -911,7 +1324,7 @@ function buildMessageHTML(item) {
     ${avatarHtml}
     <div class="message-content">
       <div class="message-header"><span class="message-sender">${escapeHtml(item.sender || '')}</span><span class="message-time">${formatTime(item.timestamp)}</span></div>
-      ${item.message ? `<div class="message-text">${escapeHtml(item.message)}</div>` : ''}
+      ${item.message ? `<div class="message-text">${renderMarkdown(item.message)}</div>` : ''}
       <div ${fileAttrs}>
         ${thumbHtml}
         <div class="file-details">
@@ -958,6 +1371,7 @@ ctxMenu.addEventListener('click', e => {
   if (action === 'show-in-folder') window.electronAPI.showInFolder(payload.path);
   if (action === 'copy-text')      { navigator.clipboard.writeText(payload.text); showNotification('Copied!', 'success'); }
   if (action === 'copy-filename')  { navigator.clipboard.writeText(payload.text); showNotification('Copied!', 'success'); }
+  if (action === 'reply-msg')      window._setReply?.(payload.sender, payload.text, payload.type);
 });
 
 document.addEventListener('click', e => {
@@ -986,8 +1400,34 @@ document.addEventListener('contextmenu', e => {
   const msgEl = e.target.closest('.message-text-only');
   if (msgEl) {
     e.preventDefault();
-    const sel = window.getSelection()?.toString() || msgEl.dataset.text || msgEl.textContent || '';
-    showCtxMenu(e.clientX, e.clientY, [{ icon:'📋', label:'Copy text', action:'copy-text', data:{ text: sel } }]);
+    const sel = window.getSelection()?.toString() || msgEl.dataset.text || '';
+    const msgDiv = msgEl.closest('.chat-message');
+    const sender = msgDiv?.querySelector('.message-sender')?.textContent || '';
+    const fullText = msgEl.dataset.text || '';
+    showCtxMenu(e.clientX, e.clientY, [
+      { icon:'↩', label:'Reply',     action:'reply-msg',  data:{ sender, text: fullText, type: 'text' } },
+      { icon:'📋', label:'Copy text', action:'copy-text',  data:{ text: sel || fullText } },
+    ]);
+    return;
+  }
+  // Reply on file bubbles too
+  const fileMsgEl = e.target.closest('.message-file');
+  if (fileMsgEl && !e.target.closest('.file-thumbnail') && !e.target.closest('.video-thumb-wrapper')) {
+    e.preventDefault();
+    const msgDiv = fileMsgEl.closest('.chat-message');
+    const sender = msgDiv?.querySelector('.message-sender')?.textContent || '';
+    const filename = fileMsgEl.querySelector('.file-name')?.textContent || '';
+    const fp = fileMsgEl.dataset.filepath;
+    const items = [
+      { icon:'↩', label:'Reply',          action:'reply-msg',      data:{ sender, text: filename, type: 'file' } },
+    ];
+    if (fp) {
+      items.push('---');
+      items.push({ icon:'📂', label:'Open file',      action:'open-file',      data:{ path: fp } });
+      items.push({ icon:'🗂',  label:'Show in folder', action:'show-in-folder', data:{ path: fp } });
+    }
+    showCtxMenu(e.clientX, e.clientY, items);
+    return;
   }
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
@@ -996,155 +1436,232 @@ document.addEventListener('scroll', hideCtxMenu, true);
 // ============================================================
 // WAN UI
 // ============================================================
-let wanCurrentSendHash = null;
-let wanCurrentReceiveHash = null;
-let wanSelectedFile = null;
+// ══ WAN / Internet transfer UI ═══════════════════════════════
+// Primary:  UPnP  (U~ code, single code, direct TCP)
+// Fallback: WebRTC (E1~ code, two-step exchange)
+
+let wanSelectedFile  = null;  // { path, name, size }
+let rtcTransfer      = null;  // RTCTransfer instance (fallback)
 
 function initWAN() {
+  // ── Drop zone ──────────────────────────────────────────────
   const dropZone = document.getElementById('wan-drop-zone');
   const fileInput = document.getElementById('wan-file-input');
-
   dropZone.addEventListener('click', () => fileInput.click());
-  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
   dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-  dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag-over'); const f = e.dataTransfer.files[0]; if (f) setWanFile(f); });
-  fileInput.addEventListener('change', e => { if (e.target.files[0]) setWanFile(e.target.files[0]); fileInput.value=''; });
-
-  document.getElementById('btn-send-private').addEventListener('click', () => wanSend('private'));
-  document.getElementById('btn-send-semi').addEventListener('click', () => wanSend('semi'));
-  document.getElementById('btn-send-direct').addEventListener('click', wanShowDirect);
-  document.getElementById('wan-cancel-send-btn').addEventListener('click', cancelWANSend);
-  document.getElementById('wan-export-torrent-btn').addEventListener('click', async () => {
-    if (!wanCurrentSendHash) return;
-    const r = await window.electronAPI.wanExportTorrent(wanCurrentSendHash);
-    if (r.success) showNotification('Torrent file saved!', 'success');
-    else if (!r.canceled) showNotification('Failed: ' + r.error, 'error');
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault(); dropZone.classList.remove('drag-over');
+    const f = e.dataTransfer.files[0]; if (f) wanSelectFile(f);
   });
+  fileInput.addEventListener('change', e => { if (e.target.files[0]) wanSelectFile(e.target.files[0]); fileInput.value = ''; });
 
-  document.getElementById('wan-receive-btn').addEventListener('click', wanReceive);
-  document.getElementById('wan-receive-input').addEventListener('keypress', e => { if (e.key === 'Enter') wanReceive(); });
-  document.getElementById('wan-cancel-receive-btn').addEventListener('click', cancelWANReceive);
+  // ── Send buttons ───────────────────────────────────────────
+  document.getElementById('wan-send-cancel').addEventListener('click', wanSendReset);
+  document.getElementById('rtc-connect-btn').addEventListener('click', rtcSenderConnect);
+  document.getElementById('rtc-answer-in').addEventListener('keypress', e => { if (e.key === 'Enter') rtcSenderConnect(); });
 
-  document.getElementById('wan-open-torrent-btn').addEventListener('click', async () => {
-    const r = await window.electronAPI.wanOpenTorrentFile();
-    if (!r || r.canceled) return;
-    if (!r.success) { showNotification('Failed: ' + r.error, 'error'); return; }
-    document.getElementById('wan-receive-status').style.display = 'block';
-    document.getElementById('wan-receive-filename').textContent = 'Opening torrent...';
-    showNotification('Download started!', 'success');
-  });
+  // ── Receive ────────────────────────────────────────────────
+  document.getElementById('wan-recv-btn').addEventListener('click', wanReceive);
+  document.getElementById('wan-recv-input').addEventListener('keypress', e => { if (e.key === 'Enter') wanReceive(); });
 
-  // Drag .torrent file onto receive input
-  const receiveInput = document.getElementById('wan-receive-input');
-  receiveInput.addEventListener('dragover', e => e.preventDefault());
-  receiveInput.addEventListener('drop', async e => {
-    e.preventDefault();
-    const file = e.dataTransfer.files[0];
-    if (!file || !file.name.endsWith('.torrent')) return;
-    const r = await window.electronAPI.wanOpenTorrentFile(file.path);
-    if (r.success) { document.getElementById('wan-receive-status').style.display = 'block'; document.getElementById('wan-receive-filename').textContent = 'Opening torrent...'; showNotification('Download started!', 'success'); }
-  });
-
-  // Copy buttons
+  // ── Copy buttons ───────────────────────────────────────────
   document.querySelectorAll('.copy-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      const target = document.getElementById(btn.dataset.target);
-      if (target && target.value) { navigator.clipboard.writeText(target.value); showNotification('Copied!', 'success'); }
+      const el = document.getElementById(btn.dataset.target);
+      if (el?.value) { navigator.clipboard.writeText(el.value); showNotification('Copied!', 'success'); }
     });
   });
 
-  // WAN Events
-  window.electronAPI.onWanProgress(data => {
-    if (data.type === 'upload') {
-      document.getElementById('wan-send-progress-wrap').style.display = 'flex';
-      document.getElementById('wan-send-progress-fill').style.width = Math.round(data.progress) + '%';
-      document.getElementById('wan-send-progress-text').textContent = Math.round(data.progress) + '%';
-      document.getElementById('wan-send-peers').textContent = data.peers + ' peer' + (data.peers !== 1 ? 's' : '');
-      if (data.peers > 0) { document.getElementById('wan-send-status-text').textContent = 'Uploading...'; document.getElementById('wan-send-status').querySelector('.status-dot').style.background = '#4ade80'; }
-    } else if (data.type === 'download') {
-      document.getElementById('wan-receive-progress-fill').style.width = Math.round(data.progress) + '%';
-      document.getElementById('wan-receive-progress-text').textContent = Math.round(data.progress) + '%';
-      document.getElementById('wan-receive-peers').textContent = data.peers + ' peer' + (data.peers !== 1 ? 's' : '');
-      if (data.peers > 0) document.getElementById('wan-receive-status-text').textContent = 'Downloading...';
+  // ── UPnP events ────────────────────────────────────────────
+  window.electronAPI.onUpnpConnected(() => {
+    document.getElementById('upnp-send-status').style.display = 'flex';
+    document.getElementById('upnp-send-status-text').textContent = 'Connected — sending…';
+    document.getElementById('upnp-send-progress').style.display = 'flex';
+  });
+  window.electronAPI.onUpnpProgress(d => {
+    if (d.pct !== undefined) {
+      const pct = Math.round(d.pct);
+      document.getElementById('upnp-send-fill').style.width = pct + '%';
+      document.getElementById('upnp-send-pct').textContent  = pct + '%';
+    }
+    if (d.received !== undefined) {
+      // receiver side
+      const pct = Math.round(d.pct);
+      document.getElementById('wan-recv-fill').style.width = pct + '%';
+      document.getElementById('wan-recv-pct').textContent  = pct + '%';
+      document.getElementById('wan-recv-status').textContent = `Receiving… ${formatBytes(d.received)} / ${formatBytes(d.total)}`;
     }
   });
-  window.electronAPI.onWanMetadata(data => { document.getElementById('wan-receive-filename').textContent = data.filename + ' (' + formatBytes(data.size) + ')'; });
-  window.electronAPI.onWanComplete(data => {
-    showNotification('Transfer complete: ' + data.filename, 'success');
-    document.getElementById('wan-receive-status').style.display = 'none';
-    document.getElementById('wan-receive-input').value = '';
+  window.electronAPI.onUpnpReceiveStart(d => {
+    document.getElementById('wan-recv-filepill').style.display = 'block';
+    document.getElementById('wan-recv-filepill').textContent   = `${d.filename}  (${formatBytes(d.size)})`;
+    document.getElementById('wan-recv-status').textContent = 'Receiving…';
   });
-  window.electronAPI.onWanError(data => { showNotification('WAN error: ' + data.error, 'error'); });
-  window.electronAPI.onWanReceiveStarted(data => {
-    document.getElementById('wan-receive-status').style.display = 'block';
-    document.getElementById('wan-receive-filename').textContent = data.filename;
-    wanCurrentReceiveHash = data.infoHash;
+  window.electronAPI.onUpnpDone(d => {
+    showNotification('Transfer complete: ' + (d.filename || d.size + ' bytes'), 'success');
+    document.getElementById('upnp-send-dot').style.background = 'var(--accent)';
+    document.getElementById('upnp-send-status-text').textContent = '✓ Transfer complete';
+    document.getElementById('wan-recv-dot').style.background = 'var(--accent)';
+    document.getElementById('wan-recv-status').textContent = '✓ Saved to Downloads';
+  });
+  window.electronAPI.onUpnpError(d => {
+    showNotification('Transfer error: ' + d.message, 'error');
+  });
+
+  // ── WebRTC events ──────────────────────────────────────────
+  window.electronAPI.onRtcSaved(d => {
+    showNotification('Saved: ' + d.name, 'success');
+    document.getElementById('wan-recv-status').textContent = '✓ Saved to Downloads';
+    document.getElementById('wan-recv-dot').style.background = 'var(--accent)';
   });
 }
 
-function setWanFile(file) {
-  wanSelectedFile = file;
-  document.getElementById('wan-selected-file').style.display = 'block';
-  document.getElementById('wan-selected-filename').textContent = file.name;
-  document.getElementById('wan-selected-size').textContent = formatBytes(file.size);
+// ── File selected for sending ──────────────────────────────────
+async function wanSelectFile(f) {
+  wanSelectedFile = { path: f.path, name: f.name, size: f.size };
   document.getElementById('wan-drop-zone').style.display = 'none';
-}
+  document.getElementById('wan-send-ready').style.display = 'block';
+  document.getElementById('wan-send-filepill').textContent = `${f.name}  (${formatBytes(f.size)})`;
+  document.getElementById('upnp-offer-out').value = '';
+  document.getElementById('upnp-send-hint').textContent = 'Contacting your router via UPnP…';
+  document.getElementById('upnp-send-panel').style.display = 'block';
+  document.getElementById('upnp-fallback-panel').style.display = 'none';
 
-async function wanSend(tier) {
-  if (!wanSelectedFile) return;
-  const btn = document.getElementById(tier === 'private' ? 'btn-send-private' : 'btn-send-semi');
-  btn.textContent = 'Generating...';
-  btn.disabled = true;
+  // Try UPnP first
   try {
-    const result = tier === 'private'
-      ? await window.electronAPI.wanSendPrivate(wanSelectedFile.path)
-      : await window.electronAPI.wanSendSemiPrivate(wanSelectedFile.path);
+    const result = await window.electronAPI.upnpSendInit(f.path);
     if (!result.success) throw new Error(result.error);
-    wanCurrentSendHash = result.infoHash;
-    document.getElementById('wan-magnet-output').value = result.magnetURI;
-    document.getElementById('wan-link-result').style.display = 'block';
-    document.getElementById('wan-selected-file').style.display = 'none';
-    if (tier === 'private') {
-      const port = result.torrentPort;
-      const peers = result.peers || [];
-      document.getElementById('wan-link-mode-label').textContent = '🔒 Private Direct — your IP is embedded in the link';
-      document.getElementById('wan-link-privacy-note').textContent = `✓ Zero third-party · Port ${port} · Peers: ${peers.join(', ')} · Same-network peers will use local IP automatically`;
-    } else {
-      document.getElementById('wan-link-mode-label').textContent = '🛡 DHT Fallback — no trackers, unguessable infohash';
-      document.getElementById('wan-link-privacy-note').textContent = '✓ Works through NAT · No port forwarding needed · DHT only';
-    }
-  } catch (err) { showNotification('Failed: ' + err.message, 'error'); }
-  finally { btn.textContent = tier === 'private' ? 'Generate Private Link' : 'Generate DHT Link'; btn.disabled = false; }
+    document.getElementById('upnp-offer-out').value = result.code;
+    document.getElementById('upnp-send-hint').textContent =
+      `Code ready (${result.code.length} chars) — one code, no reply needed ✓`;
+    document.getElementById('upnp-send-status').style.display = 'flex';
+  } catch (err) {
+    console.warn('[UPnP] failed, falling back to WebRTC:', err.message);
+    // UPnP failed — show WebRTC fallback
+    document.getElementById('upnp-send-panel').style.display = 'none';
+    document.getElementById('upnp-fallback-panel').style.display = 'block';
+    await rtcInitSend();
+  }
 }
 
-async function wanShowDirect() {
-  const addresses = await window.electronAPI.wanGetAddresses();
-  document.getElementById('wan-direct-result').style.display = 'block';
-  document.getElementById('wan-public-ip-display').value = (addresses.publicIp || 'Unknown') + ':' + addresses.directPort;
-  document.getElementById('wan-local-ip-display').value = (addresses.localIp || 'Unknown') + ':' + addresses.directPort;
+// ── WebRTC send (fallback) ─────────────────────────────────────
+async function rtcInitSend() {
+  rtcTransfer = new RTCTransfer();
+  try {
+    const code = await rtcTransfer.initSend(wanSelectedFile);
+    document.getElementById('rtc-offer-out').value = code;
+    const step2 = document.getElementById('rtc-step2-send');
+    step2.style.opacity = '1'; step2.style.pointerEvents = 'auto';
+  } catch (err) {
+    showNotification('Failed to generate transfer code: ' + err.message, 'error');
+  }
 }
 
+async function rtcSenderConnect() {
+  const code = document.getElementById('rtc-answer-in').value.trim();
+  if (!code) { showNotification('Paste the reply code first', 'error'); return; }
+  document.getElementById('rtc-send-progress-wrap').style.display = 'block';
+  document.getElementById('rtc-send-status').textContent = 'Connecting…';
+
+  rtcTransfer
+    .on('connected',    ()  => { document.getElementById('rtc-send-status').textContent = 'Connected — sending…'; })
+    .on('sendStart',    ()  => {})
+    .on('progress',     p   => {
+      const pct = Math.round(p.pct);
+      document.getElementById('rtc-send-fill').style.width = pct + '%';
+      document.getElementById('rtc-send-pct').textContent  = pct + '%';
+      document.getElementById('rtc-send-status').textContent = `Sending… ${formatBytes(p.sent)} / ${formatBytes(p.total)}`;
+    })
+    .on('done',         ()  => {
+      document.getElementById('rtc-send-status').textContent = '✓ Transfer complete';
+      document.getElementById('rtc-send-dot').style.background = 'var(--accent)';
+      showNotification('File sent!', 'success');
+    })
+    .on('error',        err => showNotification('Transfer error: ' + err.message, 'error'));
+
+  try { await rtcTransfer.acceptAnswer(code); }
+  catch (err) { showNotification('Bad reply code: ' + err.message, 'error'); }
+}
+
+// ── Receive: detect code type and handle ──────────────────────
 async function wanReceive() {
-  const input = document.getElementById('wan-receive-input').value.trim();
-  if (!input) return;
-  const result = await window.electronAPI.wanReceiveMagnet(input);
-  if (!result.success && !result.canceled) showNotification('Failed: ' + result.error, 'error');
+  const code = document.getElementById('wan-recv-input').value.trim();
+  if (!code) { showNotification('Paste a transfer code first', 'error'); return; }
+
+  document.getElementById('wan-recv-progress').style.display = 'block';
+  document.getElementById('wan-recv-status').textContent = 'Connecting…';
+  document.getElementById('wan-recv-btn').disabled = true;
+  document.getElementById('wan-recv-hint').style.display = 'none';
+
+  if (code.startsWith('U~')) {
+    // UPnP direct — just connect
+    const result = await window.electronAPI.upnpReceiveInit(code);
+    if (!result.success && !result.canceled) {
+      showNotification('Failed: ' + result.error, 'error');
+      document.getElementById('wan-recv-btn').disabled = false;
+    }
+    // progress/done come through events
+  } else if (code.startsWith('E1~')) {
+    // WebRTC — need to generate a reply
+    await rtcReceiverGenAnswer(code);
+  } else {
+    showNotification('Unrecognised code format', 'error');
+    document.getElementById('wan-recv-btn').disabled = false;
+    document.getElementById('wan-recv-progress').style.display = 'none';
+  }
 }
 
-function cancelWANSend() {
-  if (wanCurrentSendHash) { window.electronAPI.wanCancelSend(wanCurrentSendHash); wanCurrentSendHash = null; }
-  document.getElementById('wan-link-result').style.display = 'none';
-  document.getElementById('wan-direct-result').style.display = 'none';
-  document.getElementById('wan-drop-zone').style.display = 'flex';
-  document.getElementById('wan-selected-file').style.display = 'none';
+async function rtcReceiverGenAnswer(code) {
+  document.getElementById('wan-recv-status').textContent = 'Generating reply code…';
+
+  rtcTransfer = new RTCTransfer();
+  rtcTransfer
+    .on('connected',    ()  => { document.getElementById('wan-recv-status').textContent = 'Connected — receiving…'; })
+    .on('receiveStart', m   => {
+      document.getElementById('wan-recv-filepill').style.display = 'block';
+      document.getElementById('wan-recv-filepill').textContent   = `${m.name}  (${formatBytes(m.size)})`;
+    })
+    .on('progress',     p   => {
+      const pct = Math.round(p.pct);
+      document.getElementById('wan-recv-fill').style.width = pct + '%';
+      document.getElementById('wan-recv-pct').textContent  = pct + '%';
+      document.getElementById('wan-recv-status').textContent = `Receiving… ${formatBytes(p.received)} / ${formatBytes(p.total)}`;
+    })
+    .on('done',         ()  => {
+      document.getElementById('wan-recv-dot').style.background = 'var(--accent)';
+      document.getElementById('wan-recv-status').textContent = '✓ Done — saving…';
+    })
+    .on('error',        err => showNotification('Transfer error: ' + err.message, 'error'));
+
+  try {
+    const answerCode = await rtcTransfer.initReceive(code);
+    document.getElementById('rtc-step2-recv').style.display = 'block';
+    document.getElementById('rtc-answer-out').value = answerCode;
+    document.getElementById('wan-recv-status').textContent = 'Reply code ready — paste it back to sender';
+    showNotification(`Reply code ready (${answerCode.length} chars)`, 'success');
+  } catch (err) {
+    showNotification('Bad offer code: ' + err.message, 'error');
+    document.getElementById('wan-recv-btn').disabled = false;
+    document.getElementById('wan-recv-progress').style.display = 'none';
+  }
+}
+
+function wanSendReset() {
+  window.electronAPI.upnpSendCancel?.();
+  if (rtcTransfer) { rtcTransfer.close(); rtcTransfer = null; }
   wanSelectedFile = null;
+  document.getElementById('wan-drop-zone').style.display = 'flex';
+  document.getElementById('wan-send-ready').style.display = 'none';
+  document.getElementById('upnp-offer-out').value = '';
+  document.getElementById('rtc-offer-out').value = '';
+  document.getElementById('rtc-answer-in').value = '';
+  document.getElementById('upnp-send-progress').style.display = 'none';
+  document.getElementById('rtc-send-progress-wrap').style.display = 'none';
+  const step2 = document.getElementById('rtc-step2-send');
+  step2.style.opacity = '0.4'; step2.style.pointerEvents = 'none';
 }
 
-function cancelWANReceive() {
-  if (wanCurrentReceiveHash) { window.electronAPI.wanCancelReceive(wanCurrentReceiveHash); wanCurrentReceiveHash = null; }
-  document.getElementById('wan-receive-status').style.display = 'none';
-  document.getElementById('wan-receive-input').value = '';
-}
 
 // ============================================================
 // THEME SYSTEM
@@ -1270,6 +1787,44 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// Lightweight markdown renderer — safe (escapes HTML first, then applies patterns)
+function renderMarkdown(raw) {
+  if (!raw) return '';
+
+  // Split on fenced code blocks: ```...```
+  const parts = raw.split(/(```[\s\S]*?```)/g);
+
+  return parts.map((part) => {
+    if (part.startsWith('```') && part.endsWith('```')) {
+      const inner = part.slice(3, -3);
+      const nlIdx = inner.indexOf('\n');
+      const lang = nlIdx > 0 ? escapeHtml(inner.slice(0, nlIdx).trim()) : '';
+      const code = escapeHtml(nlIdx > 0 ? inner.slice(nlIdx + 1) : inner);
+      return '<pre class="md-codeblock">' + (lang ? '<span class="md-lang">' + lang + '</span>' : '') + code + '</pre>';
+    }
+
+    // Escape HTML first, then apply inline markdown to the escaped string
+    let s = escapeHtml(part);
+
+    // Inline code  `foo`
+    s = s.replace(/`([^`\r\n]+)`/g, function(_, code) { return '<code class="md-code">' + code + '</code>'; });
+    // Bold+italic  ***foo***
+    s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    // Bold  **foo**
+    s = s.replace(/\*\*([^\r\n]+?)\*\*/g, '<strong>$1</strong>');
+    // Italic  *foo*  (not ** — already consumed above)
+    s = s.replace(/\*([^*\r\n]+)\*/g, '<em>$1</em>');
+    // Italic  _foo_
+    s = s.replace(/_([^_\r\n]+)_/g, '<em>$1</em>');
+    // Strikethrough  ~~foo~~
+    s = s.replace(/~~([^\r\n]+?)~~/g, '<del>$1</del>');
+    // Newlines → <br>
+    s = s.replace(/\r?\n/g, '<br>');
+
+    return s;
+  }).join('');
+}
+
 function escapeAttr(text) {
   return text.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
@@ -1304,10 +1859,10 @@ function renderEdgeStreak() {
   }
 
   let label, color;
-  if (edgeStreakCount >= 20)      { label = 'INFERNO';  color = '#ff2200'; }
-  else if (edgeStreakCount >= 10) { label = 'BLAZING';  color = '#ff6600'; }
-  else if (edgeStreakCount >= 5)  { label = 'HOT';      color = '#fb923c'; }
-  else                            { label = 'STREAK';   color = '#fbbf24'; }
+  if (edgeStreakCount >= 20)      { label = '';  color = '#00eeff'; }
+  else if (edgeStreakCount >= 10) { label = '';  color = '#8d01df'; }
+  else if (edgeStreakCount >= 5)  { label = '';      color = '#ff2200'; }
+  else                            { label = '';   color = '#ff6600'; }
 
   badge.className = 'edge-streak-badge';
   badge.style.opacity = '1';

@@ -27,56 +27,46 @@ class WANManager extends EventEmitter {
     this.torrentClient.on('error', (err) => console.error('Torrent client error:', err));
   }
 
-  async createPrivateSend(filePath) {
+  // WAN_TRACKERS: WebSocket trackers work through NAT/firewalls because both sides
+  // make outbound connections. UDP trackers require open inbound ports.
+  static get WAN_TRACKERS() {
+    return [
+      'wss://tracker.btorrent.xyz',
+      'wss://tracker.webtorrent.dev',
+      'wss://tracker.openwebtorrent.com',
+    ];
+  }
+
+  async createSend(filePath) {
     return new Promise((resolve, reject) => {
       const filename = path.basename(filePath);
-      this.privateClient.seed(filePath, { name: filename, announce: [] }, async (torrent) => {
+      const trackers = WANManager.WAN_TRACKERS;
+      // Seed on the torrentClient (has DHT + WS trackers) with explicit announce list
+      this.torrentClient.seed(filePath, { name: filename, announce: trackers }, async (torrent) => {
         const infoHash = torrent.infoHash;
-        const torrentPort = this.PRIVATE_PORT;
-        const localIp = this.getLocalIP();
-        const publicIp = await this.getPublicIP();
-        // Local IP first - critical for same-network transfers
-        // Most home routers don't support NAT hairpinning so public IP
-        // won't work when both peers are on the same network
-        const peers = [`${localIp}:${torrentPort}`];
-        if (publicIp && publicIp !== localIp) peers.push(`${publicIp}:${torrentPort}`);
+        // Build magnet with WS tracker announce URLs so receiver can find us
         const magnetURI = `magnet:?xt=urn:btih:${infoHash}&dn=${encodeURIComponent(filename)}`
-          + peers.map(p => `&x.pe=${p}`).join(''); // x.pe must NOT be percent-encoded
-        const info = { torrent, type: 'private', filename, size: torrent.length, infoHash, torrentPort, localIp, publicIp, peers };
-        this.activeSends.set(infoHash, info);
+          + trackers.map(t => `&tr=${encodeURIComponent(t)}`).join('');
+        this.activeSends.set(infoHash, { torrent, type: 'send', filename, size: torrent.length, infoHash });
         torrent.on('upload', () => this.emit('wan-progress', {
           infoHash, type: 'upload', uploaded: torrent.uploaded, speed: torrent.uploadSpeed,
           peers: torrent.numPeers, progress: torrent.length > 0 ? (torrent.uploaded / torrent.length * 100) : 0,
         }));
         torrent.on('error', (err) => this.emit('wan-error', { infoHash, error: err.message }));
-        resolve({ magnetURI, infoHash, filename, size: torrent.length, mode: 'private', torrentPort, localIp, publicIp, peers });
+        resolve({ magnetURI, infoHash, filename, size: torrent.length, mode: 'send' });
       });
-      setTimeout(() => reject(new Error('Timed out')), 30000);
+      setTimeout(() => reject(new Error('Seeding timed out — check your internet connection')), 30000);
     });
   }
 
-  async createSemiPrivateSend(filePath) {
-    return new Promise((resolve, reject) => {
-      const filename = path.basename(filePath);
-      this.torrentClient.seed(filePath, { name: filename, announce: [] }, (torrent) => {
-        const infoHash = torrent.infoHash;
-        this.activeSends.set(infoHash, { torrent, type: 'semi-private', filename, size: torrent.length, infoHash });
-        torrent.on('upload', () => this.emit('wan-progress', {
-          infoHash, type: 'upload', uploaded: torrent.uploaded, speed: torrent.uploadSpeed,
-          peers: torrent.numPeers, progress: torrent.length > 0 ? (torrent.uploaded / torrent.length * 100) : 0,
-        }));
-        resolve({ magnetURI: torrent.magnetURI, infoHash, filename, size: torrent.length, mode: 'semi-private' });
-      });
-      setTimeout(() => reject(new Error('Timed out')), 30000);
-    });
-  }
+  // Keep old methods as aliases so existing IPC handlers still work
+  async createPrivateSend(filePath) { return this.createSend(filePath); }
+  async createSemiPrivateSend(filePath) { return this.createSend(filePath); }
 
   async receiveFromMagnet(magnetOrBuffer, savePath) {
     return new Promise((resolve, reject) => {
-      const isBuffer = Buffer.isBuffer(magnetOrBuffer);
-      const isDirectMagnet = !isBuffer && magnetOrBuffer.includes('x.pe=') && !magnetOrBuffer.includes('&tr=');
-      const client = isDirectMagnet ? this.privateClient : this.torrentClient;
-      const torrent = client.add(magnetOrBuffer, { path: savePath });
+      // Always use torrentClient — it has WS tracker support for NAT traversal
+      const torrent = this.torrentClient.add(magnetOrBuffer, { path: savePath });
       const infoHash = torrent.infoHash;
       this.activeReceives.set(infoHash, { torrent, type: 'receive', filename: 'Fetching...', size: 0, infoHash });
       this.emit('wan-receive-started', { infoHash, filename: 'Connecting to peer...', size: 0 });

@@ -243,9 +243,18 @@ class NetworkManager extends EventEmitter {
           fileInfo = JSON.parse(headerStr);
 
           // Handle text-only messages — check BOTH type field and absence of filename
+          if (fileInfo.type === 'typing') {
+            this.emit('typing-received', { sender: fileInfo.sender || '', typing: !!fileInfo.typing, peerIp });
+            socket.destroy();
+            return;
+          }
           if (fileInfo.type === 'message' || !fileInfo.filename) {
             if (fileInfo.message) {
-              this.emit('message-received', { message: fileInfo.message || '', sender: fileInfo.sender || 'Unknown', senderAvatar: fileInfo.senderAvatar || null, peerIp });
+              // Decode base64-encoded messages (new format); fall back to plain for old clients
+              const decoded = fileInfo.encoding === 'base64'
+                ? Buffer.from(fileInfo.message, 'base64').toString('utf8')
+                : (fileInfo.message || '');
+              this.emit('message-received', { message: decoded, reply: fileInfo.reply || null, sender: fileInfo.sender || 'Unknown', senderAvatar: fileInfo.senderAvatar || null, peerIp });
             }
             socket.destroy();
             return;
@@ -436,12 +445,26 @@ class NetworkManager extends EventEmitter {
     this.pendingThumbnails.set(filePath, thumbnail);
   }
 
-  async sendMessage(peerId, message) {
+  async sendTyping(peerId, isTyping) {
+    const peer = this.peers.get(peerId);
+    if (!peer) return;
+    const header = JSON.stringify({ type: 'typing', typing: isTyping, sender: this.username }) + '\n\n';
+    const client = new (require('net').Socket)();
+    client.connect(peer.port, peer.ip, () => { client.write(header); client.end(); });
+    client.on('error', () => {});
+    client.setTimeout(2000, () => client.destroy());
+  }
+
+  async sendMessage(peerId, message, reply = null) {
     const peer = this.peers.get(peerId);
     if (!peer) throw new Error('Peer not found');
     return new Promise((resolve, reject) => {
       const client = new net.Socket();
-      const header = JSON.stringify({ type: 'message', message, sender: this.username, senderAvatar: this.avatar }) + '\n\n';
+      // base64-encode message so it can never contain the \n\n delimiter
+      const encoded = Buffer.from(message, 'utf8').toString('base64');
+      const payload = { type: 'message', message: encoded, encoding: 'base64', sender: this.username, senderAvatar: this.avatar };
+      if (reply) payload.reply = reply;
+      const header = JSON.stringify(payload) + '\n\n';
       client.connect(peer.port, peer.ip, () => { client.write(header); client.end(); resolve({ success: true }); });
       client.on('error', reject);
       client.setTimeout(5000, () => { client.destroy(); reject(new Error('Timeout')); });
