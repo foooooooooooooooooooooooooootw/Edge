@@ -313,6 +313,7 @@ const sentPathCache = new Map();      // filename -> local file path, for video 
 // Edge Streak — counts consecutive files sent
 let edgeStreakCount = 0;
 let edgeStreakTimer = null;
+const STREAK_TIMEOUT_MS = 86400000; // streak resets after 24 hours of inactivity
 
 // DOM Elements
 const peerList = document.getElementById('peer-list');
@@ -1862,7 +1863,7 @@ function renderEdgeStreak() {
   if (edgeStreakCount >= 20)      { label = '';  color = '#00eeff'; }
   else if (edgeStreakCount >= 10) { label = '';  color = '#8d01df'; }
   else if (edgeStreakCount >= 5)  { label = '';      color = '#ff2200'; }
-  else                            { label = '';   color = '#ff6600'; }
+  else                            { label = '';   color = '#ff6600'; }                    { label = 'STREAK';   color = '#fbbf24'; }
 
   badge.className = 'edge-streak-badge';
   badge.style.opacity = '1';
@@ -2335,6 +2336,11 @@ function openLightbox(type, src, caption) {
       lightboxVideo.style.height = '';
       lightboxVideo.style.width = '';
     }
+    // Autoplay at half volume
+    if (type !== 'audio') {
+      lightboxVideo.volume = 0.5;
+      lightboxVideo.play().catch(() => {});
+    }
   }
   lightboxCaption.textContent = caption || '';
 }
@@ -2385,6 +2391,75 @@ document.addEventListener('click', e => {
     return;
   }
 });
+
+// ── Video thumbnail hover preview ─────────────────────────────
+// On mouseenter: overlay a tiny muted looping <video> so the user
+// can see motion before they click to expand.
+(function setupVideoHoverPreviews() {
+  let hoverVideo  = null;  // the <video> element currently shown
+  let hoverTimer  = null;  // delay before showing (avoids flash on quick passes)
+  let activeThumb = null;  // the wrapper we're currently previewing
+
+  function clearHover() {
+    clearTimeout(hoverTimer);
+    hoverTimer = null;
+    if (hoverVideo) {
+      hoverVideo.pause();
+      hoverVideo.src = '';
+      hoverVideo.remove();
+      hoverVideo = null;
+    }
+    if (activeThumb) {
+      activeThumb.classList.remove('video-hover-active');
+      activeThumb = null;
+    }
+  }
+
+  document.addEventListener('mouseover', e => {
+    const wrapper = e.target.closest('.video-thumb-wrapper');
+    if (!wrapper || wrapper === activeThumb) return;
+
+    // Get file path
+    const filepath = wrapper.dataset.filepath
+      || wrapper.closest('[data-filepath]')?.dataset.filepath;
+    if (!filepath) return;
+
+    clearHover();
+
+    // Short delay so quick mouse-overs don't flash
+    hoverTimer = setTimeout(() => {
+      const src = 'file:///' + filepath.replace(/\\/g, '/').replace(/^\//, '');
+
+      hoverVideo = document.createElement('video');
+      hoverVideo.className = 'video-thumb-preview';
+      hoverVideo.muted   = true;
+      hoverVideo.loop    = true;
+      hoverVideo.autoplay = true;
+      hoverVideo.playsInline = true;
+      hoverVideo.src = src;
+      // Seek to ~5% in so we don't just show the same first frame as the thumbnail
+      hoverVideo.addEventListener('loadedmetadata', () => {
+        if (hoverVideo && hoverVideo.duration > 0) {
+          hoverVideo.currentTime = Math.min(hoverVideo.duration * 0.05, 3);
+        }
+      }, { once: true });
+      hoverVideo.play().catch(() => {});
+
+      wrapper.appendChild(hoverVideo);
+      wrapper.classList.add('video-hover-active');
+      activeThumb = wrapper;
+    }, 250);
+  });
+
+  document.addEventListener('mouseout', e => {
+    const wrapper = e.target.closest('.video-thumb-wrapper');
+    if (!wrapper) return;
+    // Only clear if we're leaving the wrapper entirely (not moving to a child)
+    if (!wrapper.contains(e.relatedTarget)) {
+      clearHover();
+    }
+  });
+})();
 
 // Start the app
 init();
