@@ -3,7 +3,10 @@
   "version": "1.52.0",
   "description": "Edge \u2014 P2P file sharing",
   "main": "main.js",
-  "author": "foooooooooooooooooooooooooootw",
+  "author": {
+    "name": "foooooooooooooooooooooooooootw",
+    "email": "foooooooooooooooooooooooooootw@gmail.com"
+  },
   "license": "MIT",
   "scripts": {
     "start": "electron .",

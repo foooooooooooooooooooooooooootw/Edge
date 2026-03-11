@@ -2,7 +2,7 @@
 
 
 <p >
-<strong>Fast file transfer over LAN, WAN, and
+<strong>Peer-to-Peer fast file transfer over LAN, Internet and
 BitTorrent.</strong>
 <br>When someone needs a file,
 just <strong>edge it to them.</strong>
@@ -130,6 +130,7 @@ npm run dev
 -   No central file storage
 -   No telemetry at all
 -   No hidden cloud fallback
+-   Encryption built in (AES/TLS)
 
 **Edge does not upload your files anywhere**
 
