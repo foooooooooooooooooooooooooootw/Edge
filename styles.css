@@ -2817,3 +2817,32 @@ body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
   padding: 1.5rem 1rem;
   line-height: 1.6;
 }
+
+/* ── Twemoji images in picker ────────────────────────────── */
+.ep-twemoji {
+  width: 1.5rem;
+  height: 1.5rem;
+  object-fit: contain;
+  vertical-align: middle;
+  pointer-events: none;
+}
+
+/* ── Chat text emoji font stack ─────────────────────────── */
+/* Prioritise system color emoji fonts; Segoe UI Emoji covers
+   Windows 10 up to Emoji 12, Windows 11 up to Emoji 14+    */
+.message-text, .message-text-only, .reply-quote-text,
+.chat-message .message-content {
+  font-family:
+    'Apple Color Emoji',        /* macOS / iOS */
+    'Segoe UI Emoji',           /* Windows 11 */
+    'Segoe UI Symbol',          /* Windows fallback */
+    'Noto Color Emoji',         /* Linux / Android */
+    'EmojiOne Color',           /* older Linux */
+    'Twitter Color Emoji',      /* alternative */
+    inherit;
+}
+
+/* Reaction pills should also render emoji consistently */
+.reaction-pill {
+  font-family: 'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',inherit;
+}

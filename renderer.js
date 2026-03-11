@@ -317,8 +317,6 @@ const sentPathCache = new Map();      // filename -> local file path, for video 
 
 // Edge Streak — counts consecutive files sent
 let edgeStreakCount = 0;
-let edgeStreakTimer = null;
-const STREAK_TIMEOUT_MS = 86400000; // streak resets after 24 hours of inactivity
 
 // DOM Elements
 const peerList = document.getElementById('peer-list');
@@ -597,6 +595,8 @@ function setupElectronListeners() {
       if (fromPeer && document.hasFocus()) {
         window.electronAPI.sendReadReceipt?.(fromPeer.id, msgItem.msgId);
       }
+      // Peer replied — reset the streak
+      resetEdgeStreak();
       showNotification(`Message from ${data.sender}`, 'success');
     }
   });
@@ -622,6 +622,15 @@ function setupElectronListeners() {
       peers.push(peer);
       renderPeers();
       showNotification(`${peer.username} joined`, 'success');
+      // Auto-select if this is the first peer and nothing is selected yet
+      if (!selectedPeer) {
+        selectedPeer = peer;
+        chatHistory = [];
+        renderedMessageCount = 0;
+        chatMessages.innerHTML = '<p id="chat-empty-msg" style="color:#666;text-align:center;padding:2rem;">No messages yet. Say hello!</p>';
+        renderPeers();
+        updateChatHeader();
+      }
     }
   });
 
@@ -737,7 +746,7 @@ function setupElectronListeners() {
     }
     
     renderIncomingFiles();
-    
+    resetEdgeStreak();
     appendMessage({ type: 'received', filename: data.filename, size: data.size, message: incoming?.message || '', thumbnail: incoming?.thumbnail || null, sender: incoming?.sender || 'Unknown', senderAvatar: incoming?.senderAvatar || null, timestamp: new Date(), path: data.path });
   });
 
@@ -794,6 +803,13 @@ function setupElectronListeners() {
 async function loadPeers() {
   peers = await window.electronAPI.getPeers();
   renderPeers();
+  // Auto-select first peer on startup if none selected
+  if (!selectedPeer && peers.length > 0) {
+    selectedPeer = peers[0];
+    chatMessages.innerHTML = '<p id="chat-empty-msg" style="color:#666;text-align:center;padding:2rem;">No messages yet. Say hello!</p>';
+    renderPeers();
+    updateChatHeader();
+  }
 }
 
 async function loadUserInfo() {
@@ -1642,35 +1658,48 @@ function getGridEmojis(catId, searchTerm) {
   return cats.find(c => c.id === catId)?.emojis || [];
 }
 
+// Convert emoji to Twemoji CDN image URL (works on all platforms, all emoji versions)
+function emojiToTwemojiUrl(emoji) {
+  const codePoints = [];
+  for (const char of emoji) {
+    const cp = char.codePointAt(0);
+    if (cp !== 0xFE0F) codePoints.push(cp.toString(16)); // skip variation selector
+  }
+  return `https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/${codePoints.join('-')}.png`;
+}
+
+function emojiImgTag(emoji, extraClass = '') {
+  const url = emojiToTwemojiUrl(emoji);
+  return `<img src="${escapeAttr(url)}" alt="${escapeAttr(emoji)}" class="ep-twemoji${extraClass ? ' ' + extraClass : ''}" loading="lazy" onerror="this.style.display='none';this.nextSibling&&(this.nextSibling.style.display='')">`;
+}
+
 function renderGrid(catId, searchTerm = '') {
   const emojis = getGridEmojis(catId, searchTerm);
-  if (emojis.length === 0 && catId === 'custom') {
-    epGrid.innerHTML = `<div class="ep-empty">No custom emoji yet.<br>Click ＋ to add one.</div>`;
+  if (emojis.length === 0 && (catId === 'custom' || !searchTerm)) {
+    epGrid.innerHTML = `<div class="ep-empty">${catId === 'custom' ? 'No custom emoji yet.<br>Click ＋ to add one.' : 'No results'}</div>`;
     return;
   }
   if (emojis.length === 0) {
     epGrid.innerHTML = `<div class="ep-empty">No results</div>`;
     return;
   }
-  epGrid.innerHTML = emojis.map(e => {
-    const isCustom = e.startsWith('data:') || (e.length > 10 && !e.includes('️'));
-    if (isCustom && e.startsWith('data:')) {
-      // Custom image emoji - stored as {src, name} or just data URL
-      return ''; // handled below with object format
-    }
-    return `<button class="ep-emoji" data-emoji="${escapeAttr(e)}">${e}</button>`;
-  }).join('');
 
-  // Handle object-format custom emojis
-  const custom = getCustomEmojis();
-  if (catId === 'custom' && custom.length) {
+  // Handle custom category specially (mixed image/text)
+  if (catId === 'custom') {
+    const custom = getCustomEmojis();
     epGrid.innerHTML = custom.map((item, i) => {
       if (typeof item === 'object' && item.src) {
-        return `<button class="ep-emoji ep-custom-img" data-emoji="${escapeAttr(item.name || item.src)}" data-src="${escapeAttr(item.src)}" title="${escapeAttr(item.name || 'custom')}" data-custom-idx="${i}"><img src="${escapeAttr(item.src)}" style="width:1.5rem;height:1.5rem;object-fit:contain;border-radius:3px;"></button>`;
+        return `<button class="ep-emoji ep-custom-img" data-emoji="${escapeAttr(item.name || item.src)}" title="${escapeAttr(item.name || 'custom')}" data-custom-idx="${i}"><img src="${escapeAttr(item.src)}" style="width:1.5rem;height:1.5rem;object-fit:contain;border-radius:3px;"></button>`;
       }
-      return `<button class="ep-emoji" data-emoji="${escapeAttr(item)}">${item}</button>`;
+      return `<button class="ep-emoji" data-emoji="${escapeAttr(item)}">${emojiImgTag(item)}</button>`;
     }).join('');
+    return;
   }
+
+  // Standard categories — use Twemoji images for consistent rendering
+  epGrid.innerHTML = emojis.map(e =>
+    `<button class="ep-emoji" data-emoji="${escapeAttr(e)}" title="${escapeAttr(e)}">${emojiImgTag(e)}</button>`
+  ).join('');
 }
 
 function showEmojiPickerFull(anchorEl, mode, msgId) {
@@ -2145,41 +2174,43 @@ function escapeAttr(text) {
 // ============================================================
 // EDGE STREAK
 // ============================================================
+// Streak increments on each file sent, resets when the peer replies
+// (sends a message or file back). No timer — it persists until they respond.
 function bumpEdgeStreak() {
   edgeStreakCount++;
-  if (edgeStreakTimer) clearTimeout(edgeStreakTimer);
-  // Only show streak badge at 2+
   if (edgeStreakCount >= 2) renderEdgeStreak();
-  // Reset after inactivity
-  edgeStreakTimer = setTimeout(() => {
+}
+
+function resetEdgeStreak() {
+  if (edgeStreakCount >= 2) {
     edgeStreakCount = 0;
     renderEdgeStreak();
-  }, STREAK_TIMEOUT_MS);
+  } else {
+    edgeStreakCount = 0;
+  }
 }
 
 function renderEdgeStreak() {
   let badge = document.getElementById('edge-streak-badge');
   if (edgeStreakCount < 2) {
-    if (badge) badge.style.opacity = '0';
-    setTimeout(() => { const b = document.getElementById('edge-streak-badge'); if (b && edgeStreakCount < 2) b.remove(); }, 300);
+    if (badge) { badge.style.opacity = '0'; setTimeout(() => badge.remove(), 300); }
     return;
   }
   if (!badge) {
     badge = document.createElement('div');
     badge.id = 'edge-streak-badge';
-    // Attach to body so it survives tab switches — positioned above the input bar
     document.body.appendChild(badge);
   }
 
-  let label, color;
-  if (edgeStreakCount >= 20)      { label = '';  color = '#00eeff'; }
-  else if (edgeStreakCount >= 10) { label = '';  color = '#8d01df'; }
-  else if (edgeStreakCount >= 5)  { label = '';      color = '#ff2200'; }
-  else                            { label = '';   color = '#ff6600'; }                    { label = 'STREAK';   color = '#fbbf24'; }
+  let color;
+  if      (edgeStreakCount >= 20) color = '#00eeff';
+  else if (edgeStreakCount >= 10) color = '#8d01df';
+  else if (edgeStreakCount >= 5)  color = '#ff2200';
+  else                            color = '#ff6600';
 
   badge.className = 'edge-streak-badge';
   badge.style.opacity = '1';
-  badge.innerHTML = `🔥 <span class="streak-count">${edgeStreakCount}</span> <span class="streak-label">${label} EDGE STREAK</span>`;
+  badge.innerHTML = `<span class="streak-count">${edgeStreakCount}</span>🔥 <span class="streak-label">Edge Streak</span>`;
   badge.style.setProperty('--streak-color', color);
   badge.classList.remove('streak-pulse');
   void badge.offsetWidth;
