@@ -1,6 +1,6 @@
 {
   "name": "edge-fileshare",
-  "version": "1.52.0",
+  "version": "1.53.0",
   "description": "Edge \u2014 P2P file sharing",
   "main": "main.js",
   "author": {
