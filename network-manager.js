@@ -1,10 +1,12 @@
 const dgram = require('dgram');
 const net = require('net');
+const tls = require('tls');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
+const { loadOrCreateCert, getCertFingerprint } = require('./cert-gen');
 
 const BROADCAST_PORT = 45454;
 const TRANSFER_PORT_START = 45455;
@@ -18,14 +20,32 @@ class NetworkManager extends EventEmitter {
     this.peers = new Map();
     this.config = this.loadConfig();
     this.username = this.config.username || os.hostname();
-    this.peerId = this.config.peerId; // Persistent ID
-    this.avatar = this.config.avatar || null; // Base64 avatar
-    this.favorites = this.config.favorites || {}; // Map of peerId -> nickname
+    this.peerId = this.config.peerId;
+    this.avatar = this.config.avatar || null;
+    this.favorites = this.config.favorites || {};
     this.broadcastSocket = null;
     this.transferServer = null;
     this.transferPort = TRANSFER_PORT_START;
     this.activeTransfers = new Map();
+    // TLS — load or generate persistent self-signed cert
+    this._tlsCreds = loadOrCreateCert();
+    this._encryptLAN = this.config.encryptLAN !== false; // default ON
   }
+
+  getEncryptLAN() { return this._encryptLAN; }
+  setEncryptLAN(val) {
+    this._encryptLAN = !!val;
+    this.config.encryptLAN = this._encryptLAN;
+    this.saveConfig();
+    // Restart transfer server with new setting
+    if (this.transferServer) {
+      try { this.transferServer.close(); } catch {}
+      this.transferServer = null;
+      this.startTransferServer();
+    }
+  }
+
+  getMyFingerprint() { return this._tlsCreds.fingerprint; }
 
   loadConfig() {
     const configDir = path.join(os.homedir(), '.file-share-app');
@@ -154,7 +174,9 @@ class NetworkManager extends EventEmitter {
           port: data.transferPort,
           avatar: data.avatar || null,
           nickname: this.getFavoriteNickname(data.peerId),
-          lastSeen: Date.now()
+          lastSeen: Date.now(),
+          tlsFingerprint: data.tlsFingerprint || null,
+          encrypted: !!data.encrypted,
         };
 
         const isNewPeer = !this.peers.has(peer.id);
@@ -187,7 +209,9 @@ class NetworkManager extends EventEmitter {
       peerId: this.peerId,
       username: this.username,
       transferPort: this.transferPort,
-      avatar: this.avatar
+      avatar: this.avatar,
+      tlsFingerprint: this._encryptLAN ? this._tlsCreds.fingerprint : null,
+      encrypted: this._encryptLAN,
     });
 
     const buffer = Buffer.from(message);
@@ -207,9 +231,20 @@ class NetworkManager extends EventEmitter {
   }
 
   startTransferServer() {
-    this.transferServer = net.createServer((socket) => {
-      this.handleIncomingTransfer(socket);
-    });
+    const onSocket = (socket) => this.handleIncomingTransfer(socket);
+
+    if (this._encryptLAN) {
+      this.transferServer = tls.createServer({
+        cert: this._tlsCreds.cert,
+        key:  this._tlsCreds.key,
+        rejectUnauthorized: false,  // TOFU — we verify fingerprint in broadcast, not via CA
+        requestCert: true,          // ask client to present cert so we can record their fingerprint
+      }, onSocket);
+      console.log('[TLS] Transfer server will use TLS (AES-256-GCM)');
+    } else {
+      this.transferServer = net.createServer(onSocket);
+      console.log('[Net] Transfer server using plain TCP (encryption disabled)');
+    }
 
     this.transferServer.listen(this.transferPort, () => {
       console.log(`Transfer server listening on port ${this.transferPort}`);
@@ -245,6 +280,16 @@ class NetworkManager extends EventEmitter {
           // Handle text-only messages — check BOTH type field and absence of filename
           if (fileInfo.type === 'typing') {
             this.emit('typing-received', { sender: fileInfo.sender || '', typing: !!fileInfo.typing, peerIp });
+            socket.destroy();
+            return;
+          }
+          if (fileInfo.type === 'reaction') {
+            this.emit('reaction-received', { messageId: fileInfo.messageId, emoji: fileInfo.emoji, sender: fileInfo.sender, senderName: fileInfo.senderName, peerIp });
+            socket.destroy();
+            return;
+          }
+          if (fileInfo.type === 'read') {
+            this.emit('read-receipt', { messageId: fileInfo.messageId, sender: fileInfo.sender, peerIp });
             socket.destroy();
             return;
           }
@@ -445,147 +490,187 @@ class NetworkManager extends EventEmitter {
     this.pendingThumbnails.set(filePath, thumbnail);
   }
 
+  // ── TLS-aware socket factory ───────────────────────────────
+  // Returns a socket (plain or TLS) connected to the peer.
+  // Resolves once connected, rejects on error/timeout.
+  _connectToPeer(peer, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+      const useTLS = this._encryptLAN && peer.encrypted;
+      let socket;
+
+      if (useTLS) {
+        socket = tls.connect({
+          host: peer.ip,
+          port: peer.port,
+          rejectUnauthorized: false,  // TOFU — we don't use a CA
+          // If peer announced a fingerprint, verify it after connect
+          checkServerIdentity: () => undefined,
+        });
+        socket.once('secureConnect', () => {
+          // Optional TOFU fingerprint check
+          if (peer.tlsFingerprint) {
+            const actualFp = socket.getPeerCertificate()?.fingerprint256;
+            if (actualFp && actualFp !== peer.tlsFingerprint) {
+              socket.destroy();
+              reject(new Error(`TLS fingerprint mismatch for ${peer.username}! Expected ${peer.tlsFingerprint} got ${actualFp}`));
+              return;
+            }
+          }
+          resolve(socket);
+        });
+      } else {
+        socket = new net.Socket();
+        socket.connect(peer.port, peer.ip, () => resolve(socket));
+      }
+
+      socket.once('error', reject);
+      socket.setTimeout(timeoutMs, () => { socket.destroy(); reject(new Error('Connection timeout')); });
+    });
+  }
+
   async sendTyping(peerId, isTyping) {
     const peer = this.peers.get(peerId);
     if (!peer) return;
     const header = JSON.stringify({ type: 'typing', typing: isTyping, sender: this.username }) + '\n\n';
-    const client = new (require('net').Socket)();
-    client.connect(peer.port, peer.ip, () => { client.write(header); client.end(); });
-    client.on('error', () => {});
-    client.setTimeout(2000, () => client.destroy());
+    try {
+      const socket = await this._connectToPeer(peer, 2000);
+      socket.write(header);
+      socket.end();
+    } catch {}
   }
 
   async sendMessage(peerId, message, reply = null) {
     const peer = this.peers.get(peerId);
     if (!peer) throw new Error('Peer not found');
+    const encoded = Buffer.from(message, 'utf8').toString('base64');
+    const payload = { type: 'message', message: encoded, encoding: 'base64', sender: this.username, senderAvatar: this.avatar };
+    if (reply) payload.reply = reply;
+    const header = JSON.stringify(payload) + '\n\n';
+    const socket = await this._connectToPeer(peer);
     return new Promise((resolve, reject) => {
-      const client = new net.Socket();
-      // base64-encode message so it can never contain the \n\n delimiter
-      const encoded = Buffer.from(message, 'utf8').toString('base64');
-      const payload = { type: 'message', message: encoded, encoding: 'base64', sender: this.username, senderAvatar: this.avatar };
-      if (reply) payload.reply = reply;
-      const header = JSON.stringify(payload) + '\n\n';
-      client.connect(peer.port, peer.ip, () => { client.write(header); client.end(); resolve({ success: true }); });
-      client.on('error', reject);
-      client.setTimeout(5000, () => { client.destroy(); reject(new Error('Timeout')); });
+      socket.write(header);
+      socket.end();
+      socket.once('error', reject);
+      resolve({ success: true });
     });
+  }
+
+  async sendReaction(peerId, messageId, emoji) {
+    const peer = this.peers.get(peerId);
+    if (!peer) return;
+    const payload = { type: 'reaction', messageId, emoji, sender: this.peerId, senderName: this.username };
+    const header = JSON.stringify(payload) + '\n\n';
+    try {
+      const socket = await this._connectToPeer(peer, 3000);
+      socket.write(header);
+      socket.end();
+    } catch (e) { console.warn('[sendReaction] failed:', e.message); }
+  }
+
+  async sendReadReceipt(peerId, messageId) {
+    const peer = this.peers.get(peerId);
+    if (!peer) return;
+    const payload = { type: 'read', messageId, sender: this.peerId };
+    const header = JSON.stringify(payload) + '\n\n';
+    try {
+      const socket = await this._connectToPeer(peer, 2000);
+      socket.write(header);
+      socket.end();
+    } catch {}
   }
 
   async sendFile(peerId, filePath, message = '') {
     const peer = this.peers.get(peerId);
-    if (!peer) {
-      throw new Error('Peer not found');
+    if (!peer) throw new Error('Peer not found');
+
+    const fileStats = fs.statSync(filePath);
+    const filename = path.basename(filePath);
+
+    let thumbnail = null;
+    const ext = filename.split('.').pop().toLowerCase();
+    if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext)) {
+      try {
+        const imageData = fs.readFileSync(filePath);
+        const base64 = imageData.toString('base64');
+        if (base64.length < 800000) thumbnail = `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,${base64}`;
+      } catch (err) { console.error('Thumbnail error:', err); }
+    } else if (['mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v', 'wmv', 'flv'].includes(ext)) {
+      const extracted = this.pendingThumbnails?.get(filePath);
+      if (extracted) { thumbnail = extracted; this.pendingThumbnails.delete(filePath); }
+      else thumbnail = `__video__:${ext}`;
     }
 
+    const header = JSON.stringify({ filename, size: fileStats.size, message, thumbnail, sender: this.username, senderAvatar: this.avatar }) + '\n\n';
+
+    const client = await this._connectToPeer(peer);
+    client.setNoDelay(true);
+
     return new Promise((resolve, reject) => {
-      const client = new net.Socket();
-      const fileStats = fs.statSync(filePath);
-      const filename = path.basename(filePath);
-      
-      let thumbnail = null;
-      const ext = filename.split('.').pop().toLowerCase();
-      if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext)) {
-        try {
-          const imageData = fs.readFileSync(filePath);
-          const base64 = imageData.toString('base64');
-          if (base64.length < 800000) {
-            thumbnail = `data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,${base64}`;
-          }
-        } catch (err) { console.error('Thumbnail error:', err); }
-      } else if (['mp4', 'webm', 'mov', 'avi', 'mkv', 'm4v', 'wmv', 'flv'].includes(ext)) {
-        // Check if renderer already extracted a real thumbnail for us
-        const extracted = this.pendingThumbnails?.get(filePath);
-        if (extracted) {
-          thumbnail = extracted;
-          this.pendingThumbnails.delete(filePath);
-        } else {
-          thumbnail = `__video__:${ext}`;
+      client.write(header);
+
+      const fileStream = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 });
+      let sentBytes = 0, lastProgressEmit = 0, isPaused = false;
+
+      fileStream.on('data', (chunk) => {
+        const canContinue = client.write(chunk);
+        sentBytes += chunk.length;
+        const now = Date.now();
+        if (now - lastProgressEmit >= 100) {
+          this.emit('transfer-progress', { peerId, filename, sentBytes, totalBytes: fileStats.size, progress: (sentBytes / fileStats.size) * 100 });
+          lastProgressEmit = now;
         }
-      }
-      
-      // Prepare header with message and thumbnail
-      const header = JSON.stringify({
-        filename: filename,
-        size: fileStats.size,
-        message: message,
-        thumbnail: thumbnail,
-        sender: this.username,
-        senderAvatar: this.avatar
-      }) + '\n\n';
-
-      client.connect(peer.port, peer.ip, () => {
-        // Disable Nagle's algorithm for more accurate progress
-        client.setNoDelay(true);
-        
-        // Send header
-        client.write(header);
-        
-        // Stream file with backpressure handling
-        const fileStream = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 }); // 64KB chunks
-        let sentBytes = 0;
-        let lastProgressEmit = 0;
-        const startTime = Date.now();
-        let isPaused = false;
-
-        fileStream.on('data', (chunk) => {
-          // Write returns false if buffer is full
-          const canContinue = client.write(chunk);
-          sentBytes += chunk.length;
-          
-          // Throttle to every 100ms
-          const now = Date.now();
-          if (now - lastProgressEmit >= 100) {
-            this.emit('transfer-progress', {
-              peerId,
-              filename,
-              sentBytes,
-              totalBytes: fileStats.size,
-              progress: (sentBytes / fileStats.size) * 100
-            });
-            lastProgressEmit = now;
-          }
-          
-          // Pause reading if network buffer is full (backpressure)
-          if (!canContinue && !isPaused) {
-            fileStream.pause();
-            isPaused = true;
-          }
-        });
-
-        // Resume when network buffer drains
-        client.on('drain', () => {
-          if (isPaused) {
-            fileStream.resume();
-            isPaused = false;
-          }
-        });
-
-        fileStream.on('end', () => {
-          client.end();
-          this.emit('transfer-complete', {
-            peerId,
-            filename,
-            size: fileStats.size,
-            message,
-            thumbnail
-          });
-          resolve({ success: true });
-        });
-
-        fileStream.on('error', (err) => {
-          client.destroy();
-          reject(err);
-        });
+        if (!canContinue && !isPaused) { fileStream.pause(); isPaused = true; }
       });
-
-      client.on('error', (err) => {
-        reject(err);
+      client.on('drain', () => { if (isPaused) { fileStream.resume(); isPaused = false; } });
+      fileStream.on('end', () => {
+        client.end();
+        this.emit('transfer-complete', { peerId, filename, size: fileStats.size, message, thumbnail });
+        resolve({ success: true });
       });
+      fileStream.on('error', (err) => { client.destroy(); reject(err); });
+      client.on('error', reject);
     });
   }
 
   getPeers() {
     return Array.from(this.peers.values());
+  }
+
+  getTransferPort() {
+    return this.transferPort;
+  }
+
+  // ── WAN Direct peers ────────────────────────────────────────
+  // Inject a synthetic peer into the same peers Map so all existing
+  // sendFile / sendMessage / sendTyping logic works unchanged.
+  addWanDirectPeer(id, ip, port, label) {
+    const peer = {
+      id,
+      ip,
+      port,
+      username: label || `${ip}:${port}`,
+      avatar: null,
+      nickname: null,
+      lastSeen: Date.now(),
+      isWanDirect: true,   // flag so renderer can style it differently
+    };
+    this.peers.set(id, peer);
+    this.emit('peer-discovered', peer);
+    return peer;
+  }
+
+  removeWanDirectPeer(id) {
+    if (this.peers.has(id)) {
+      this.peers.delete(id);
+      this.emit('peer-left', id);
+    }
+  }
+
+  // Keep WAN-direct peers "alive" — call periodically from main
+  heartbeatWanDirectPeers() {
+    for (const [id, peer] of this.peers) {
+      if (peer.isWanDirect) peer.lastSeen = Date.now();
+    }
   }
 }
 

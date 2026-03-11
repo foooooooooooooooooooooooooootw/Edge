@@ -78,6 +78,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onTypingReceived: (cb) => ipcRenderer.on('typing-received', (e, d) => cb(d)),
   onMessageReceived: (cb) => ipcRenderer.on('message-received', (e, d) => cb(d)),
 
+  // WAN Direct
+  wanDirectGetMyAddress: () => ipcRenderer.invoke('wan-direct-get-my-address'),
+  wanDirectAddPeer: (id, ip, port, label) => ipcRenderer.invoke('wan-direct-add-peer', { id, ip, port, label }),
+  wanDirectRemovePeer: (id) => ipcRenderer.invoke('wan-direct-remove-peer', { id }),
+
+  // Encryption
+  getEncryptLAN: () => ipcRenderer.invoke('get-encrypt-lan'),
+  setEncryptLAN: (enabled) => ipcRenderer.invoke('set-encrypt-lan', enabled),
+
+  // Reactions & read receipts
+  sendReaction: (peerId, messageId, emoji) => ipcRenderer.invoke('send-reaction', { peerId, messageId, emoji }),
+  sendReadReceipt: (peerId, messageId) => ipcRenderer.invoke('send-read-receipt', { peerId, messageId }),
+  onReactionReceived: (cb) => ipcRenderer.on('reaction-received', (e, d) => cb(d)),
+  onReadReceipt: (cb) => ipcRenderer.on('read-receipt', (e, d) => cb(d)),
+
+  // Clipboard image paste
+  saveClipboardImage: (dataUrl, filename) => ipcRenderer.invoke('save-clipboard-image', { dataUrl, filename }),
+
   // WAN Events
   onWanProgress: (cb) => ipcRenderer.on('wan-progress', (e, d) => cb(d)),
   onWanComplete: (cb) => ipcRenderer.on('wan-complete', (e, d) => cb(d)),

@@ -302,7 +302,12 @@ let sendingFiles = new Map(); // filename -> progress data
 let chatHistory = [];
 let isRendering = false; // Prevent render loops
 let incomingSectionVisible = false; // Track if section is shown
-let currentMode = 'lan'; // 'lan', 'wan', 'torrents'
+let currentMode = 'lan'; // 'lan', 'torrents'
+
+// WAN Direct peers live in the main process peers Map (same as LAN).
+// We only need a flag check: peer.isWanDirect === true
+let rtcTransfer = null; // kept for legacy WebRTC fallback compatibility
+
 let renderedMessageCount = 0;
 const sentThumbnailCache = new Map();
 const unreadCounts = new Map();       // peerId -> unread count
@@ -352,7 +357,8 @@ function init() {
   loadPeers();
   loadUserInfo();
   loadSettings();
-  initWAN();
+  restoreWanDirectPeers();
+  initWANPeerModal();
   initTorrents();
 }
 
@@ -585,7 +591,12 @@ function setupElectronListeners() {
       renderPeers();
       showNotification(`${data.sender}: ${data.message.substring(0, 40)}${data.message.length > 40 ? '…' : ''}`, 'success');
     } else {
-      appendMessage({ type: 'message', subtype: 'received', message: data.message, reply: data.reply || null, sender: data.sender || 'Unknown', senderAvatar: data.senderAvatar || null, timestamp: new Date() });
+      const msgItem = { type: 'message', subtype: 'received', message: data.message, reply: data.reply || null, sender: data.sender || 'Unknown', senderAvatar: data.senderAvatar || null, timestamp: new Date() };
+      appendMessage(msgItem);
+      // Send read receipt if chat is in focus
+      if (fromPeer && document.hasFocus()) {
+        window.electronAPI.sendReadReceipt?.(fromPeer.id, msgItem.msgId);
+      }
       showNotification(`Message from ${data.sender}`, 'success');
     }
   });
@@ -768,6 +779,16 @@ function setupElectronListeners() {
       incoming.progress = 100;
     }
   });
+
+  // Reactions
+  window.electronAPI.onReactionReceived?.((data) => {
+    addReaction(data.messageId, data.emoji, data.sender, false);
+  });
+
+  // Read receipts
+  window.electronAPI.onReadReceipt?.((data) => {
+    markMessageRead(data.messageId);
+  });
 }
 
 async function loadPeers() {
@@ -789,6 +810,20 @@ async function loadSettings() {
   const receiveMode = await window.electronAPI.getReceiveMode();
   const radio = document.querySelector(`input[name="receive-mode"][value="${receiveMode}"]`);
   if (radio) radio.checked = true;
+
+  // Encryption setting
+  const encResult = await window.electronAPI.getEncryptLAN?.();
+  const toggle = document.getElementById('encrypt-lan-toggle');
+  const fpEl = document.getElementById('encrypt-fingerprint');
+  if (toggle && encResult) {
+    toggle.checked = encResult.enabled;
+    if (fpEl && encResult.fingerprint) fpEl.textContent = '🔑 Your fingerprint: ' + encResult.fingerprint;
+    toggle.addEventListener('change', async () => {
+      await window.electronAPI.setEncryptLAN(toggle.checked);
+      showNotification(toggle.checked ? 'Encryption enabled' : 'Encryption disabled', 'success');
+    });
+  }
+
   initTheme();
   initThemeUI();
   initTrackerSettings();
@@ -812,7 +847,6 @@ function switchMode(mode) {
   if (selectedContainer) {
     selectedContainer.style.display = 'flex';
   }
-  
 }
 
 function showTypingIndicator(isTyping, sender) {
@@ -821,9 +855,14 @@ function showTypingIndicator(isTyping, sender) {
 }
 
 function renderPeers() {
-  peerCount.textContent = `${peers.length} online`;
+  const lanPeers = peers.filter(p => !p.isWanDirect);
+  const wanDirPeers = peers.filter(p => p.isWanDirect);
+  const lanCount = lanPeers.length;
+  const wanCount = wanDirPeers.length;
+  const total = peers.length;
+  peerCount.textContent = `${lanCount} LAN${wanCount ? ` · ${wanCount} WAN` : ''}`;
   
-  if (peers.length === 0) {
+  if (total === 0) {
     peerList.innerHTML = `
       <div class="empty-state">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -833,53 +872,26 @@ function renderPeers() {
           <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
         </svg>
         <p>No peers found</p>
-        <small>Waiting for others on your network...</small>
+        <small>Waiting for LAN peers, or add a WAN peer →</small>
       </div>
     `;
     return;
   }
 
-  peerList.innerHTML = peers.map(peer => {
-    const displayName = peer.nickname || peer.username;
-    const avatarHtml = peer.avatar 
-      ? `<img src="${peer.avatar}" class="peer-avatar" alt="${escapeHtml(peer.username)}">`
-      : `<div class="peer-avatar-placeholder">
-           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-             <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
-             <circle cx="12" cy="7" r="4"></circle>
-           </svg>
-         </div>`;
-    
-    return `
-      <div class="peer-item ${selectedPeer && selectedPeer.id === peer.id ? 'selected' : ''}" 
-           data-peer-id="${peer.id}">
-        ${avatarHtml}
-        <div class="peer-info">
-          <div class="peer-name">
-            ${escapeHtml(displayName)}
-            ${peer.nickname ? `<span class="peer-nickname">(${escapeHtml(peer.username)})</span>` : ''}
-            ${(unreadCounts.get(peer.id)||0) > 0 ? `<span class="unread-badge">${Math.min(unreadCounts.get(peer.id),99)}</span>` : ''}
-          </div>
-          <div class="peer-ip">${peer.ip}</div>
-        </div>
-        <div class="peer-actions">
-          <button class="nickname-btn" data-peer-id="${peer.id}" title="Set nickname">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
-              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
-            </svg>
-          </button>
-        </div>
-      </div>
-    `;
-  }).join('');
+  let html = '';
+  if (lanCount > 0) {
+    if (wanCount > 0) html += `<div class="peer-section-label">LAN</div>`;
+    html += lanPeers.map(p => renderPeerItem(p, 'lan')).join('');
+  }
+  if (wanCount > 0) {
+    if (lanCount > 0) html += `<div class="peer-section-label" style="margin-top:0.5rem;">WAN</div>`;
+    html += wanDirPeers.map(p => renderPeerItem(p, 'wan')).join('');
+  }
+  peerList.innerHTML = html;
 
-  // Add click handlers
   document.querySelectorAll('.peer-item').forEach(item => {
     item.addEventListener('click', (e) => {
-      if (e.target.closest('.nickname-btn')) {
-        return;
-      }
+      if (e.target.closest('.nickname-btn') || e.target.closest('.remove-wan-btn')) return;
       const peerId = item.dataset.peerId;
       selectedPeer = peers.find(p => p.id === peerId);
       unreadCounts.delete(peerId);
@@ -892,75 +904,120 @@ function renderPeers() {
     });
   });
 
-  // Nickname buttons
   document.querySelectorAll('.nickname-btn').forEach(btn => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       const peerId = btn.dataset.peerId;
       const peer = peers.find(p => p.id === peerId);
-      
-      const nickname = prompt(
-        `Set nickname for ${peer.username}:`,
-        peer.nickname || ''
-      );
-      
+      if (!peer) return;
+      const nickname = prompt(`Set nickname for ${peer.username}:`, peer.nickname || '');
       if (nickname !== null) {
         await window.electronAPI.setFavoriteNickname(peerId, nickname.trim());
         peer.nickname = nickname.trim() || null;
         renderPeers();
-        showNotification(
-          nickname.trim() 
-            ? `Nickname set to "${nickname.trim()}"` 
-            : 'Nickname removed',
-          'success'
-        );
+        showNotification(nickname.trim() ? `Nickname set to "${nickname.trim()}"` : 'Nickname removed', 'success');
       }
+    });
+  });
+
+  document.querySelectorAll('.remove-wan-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const peerId = btn.dataset.peerId;
+      await window.electronAPI.wanDirectRemovePeer(peerId);
+      // Remove from persisted storage too
+      const saved = loadWanDirectPeersFromStorage().filter(p => p.id !== peerId);
+      saveWanDirectPeersToStorage(saved);
+      if (selectedPeer && selectedPeer.id === peerId) { selectedPeer = null; updateChatHeader(); }
+      // peer-left event will re-render
+      showNotification('WAN peer removed', 'success');
     });
   });
 }
 
+function renderPeerItem(peer, type) {
+  const isWan = type === 'wan';
+  const displayName = peer.nickname || peer.username;
+  const isSelected = selectedPeer && selectedPeer.id === peer.id;
+  const avatarHtml = peer.avatar
+    ? `<img src="${peer.avatar}" class="peer-avatar" alt="${escapeHtml(peer.username)}">`
+    : `<div class="peer-avatar-placeholder ${isWan ? 'wan-peer-avatar' : ''}">
+         ${isWan
+           ? `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`
+           : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`
+         }
+       </div>`;
+  const subtext = `<div class="peer-ip">${peer.ip}${isWan ? `:${peer.port}` : ''}</div>`;
+  const unread = (unreadCounts.get(peer.id)||0) > 0
+    ? `<span class="unread-badge">${Math.min(unreadCounts.get(peer.id),99)}</span>` : '';
+  const nicknameTag = peer.nickname && !isWan ? `<span class="peer-nickname">(${escapeHtml(peer.username)})</span>` : '';
+  const actions = isWan
+    ? `<div class="peer-actions"><button class="remove-wan-btn" data-peer-id="${peer.id}" title="Remove"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button></div>`
+    : `<div class="peer-actions"><button class="nickname-btn" data-peer-id="${peer.id}" title="Set nickname"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg></button></div>`;
+  return `<div class="peer-item ${isSelected ? 'selected' : ''} ${isWan ? 'wan-peer-item' : ''}" data-peer-id="${peer.id}" data-peer-type="${type}">
+    ${avatarHtml}
+    <div class="peer-info">
+      <div class="peer-name ${isWan ? 'wan-peer-name' : ''}">${escapeHtml(displayName)}${nicknameTag}${unread}</div>
+      ${subtext}
+    </div>
+    ${actions}
+  </div>`;
+}
+
+
 function updateChatHeader() {
   if (!selectedPeer) {
     chatHeader.innerHTML = '';
-    // Show centered empty state in the messages area
     if (!document.getElementById('chat-empty-state')) {
       chatMessages.innerHTML = `
         <div id="chat-empty-state" class="chat-empty-state">
           <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
           </svg>
-          <h2>Select a peer to start chatting</h2>
-          <p>People on your local network will appear in the sidebar</p>
+          <h2>Select a peer to chat</h2>
+          <p>LAN peers are discovered automatically · add WAN peers with the button above</p>
         </div>
       `;
     }
+    const inputArea = document.getElementById('input-area');
+    if (inputArea) inputArea.style.display = '';
     return;
   }
-  // Clear empty state when a peer is selected
+
   const emptyState = document.getElementById('chat-empty-state');
   if (emptyState) emptyState.remove();
 
+  // WAN direct peers behave identically to LAN peers — same chat, same input, same file drop
+  const isWanDirect = selectedPeer.isWanDirect;
   const avatarHtml = selectedPeer.avatar
     ? `<img src="${selectedPeer.avatar}" class="chat-peer-avatar" alt="${escapeHtml(selectedPeer.username)}">`
-    : `<div class="chat-peer-avatar-placeholder">
-         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-           <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
-           <circle cx="12" cy="7" r="4"></circle>
-         </svg>
+    : `<div class="chat-peer-avatar-placeholder ${isWanDirect ? 'wan-chat-avatar' : ''}">
+         ${isWanDirect
+           ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`
+           : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`
+         }
        </div>`;
-
   const displayName = selectedPeer.nickname || selectedPeer.username;
+  const subtitle = isWanDirect
+    ? `${selectedPeer.ip}:${selectedPeer.port} <span class="wan-badge">WAN</span>`
+    : selectedPeer.ip;
 
   chatHeader.innerHTML = `
     <div class="chat-header-active">
       ${avatarHtml}
       <div class="chat-peer-info">
         <h3>${escapeHtml(displayName)}</h3>
-        <p>${selectedPeer.ip}</p>
+        <p>${subtitle}</p>
       </div>
     </div>
   `;
+
+  const inputArea = document.getElementById('input-area');
+  if (inputArea) inputArea.style.display = '';
+  const replyBarEl = document.getElementById('reply-bar');
+  if (replyBarEl) replyBarEl.style.display = 'none';
 }
+
 
 async function handleFiles(files) {
   if (!selectedPeer) {
@@ -1244,6 +1301,62 @@ function formatTime(date) {
 }
 
 // Append-only chat — never rebuilds the whole list
+// ── Reaction & read receipt state ────────────────────────────
+// messageId → Map<emoji, Set<senderId>>
+const messageReactions = new Map();
+// messageId → boolean (true = peer has read it)
+const messageReadStatus = new Map();
+// msgIndex counter for stable IDs
+let msgIdCounter = 0;
+
+function addReaction(messageId, emoji, senderId, isOwn) {
+  if (!messageReactions.has(messageId)) messageReactions.set(messageId, new Map());
+  const reactionMap = messageReactions.get(messageId);
+  if (!reactionMap.has(emoji)) reactionMap.set(emoji, new Set());
+  if (isOwn && reactionMap.get(emoji).has('__me__')) {
+    reactionMap.get(emoji).delete('__me__'); // toggle off
+    if (reactionMap.get(emoji).size === 0) reactionMap.delete(emoji);
+  } else {
+    reactionMap.get(emoji).add(isOwn ? '__me__' : senderId);
+  }
+  updateReactionRow(messageId);
+}
+
+function updateReactionRow(messageId) {
+  const el = document.querySelector(`[data-msg-id="${messageId}"] .reaction-row`);
+  if (!el) return;
+  const reactionMap = messageReactions.get(messageId) || new Map();
+  el.innerHTML = buildReactionRowHTML(messageId, reactionMap);
+  attachReactionHandlers(el, messageId);
+}
+
+function buildReactionRowHTML(messageId, reactionMap) {
+  if (!reactionMap || reactionMap.size === 0) return '';
+  return [...reactionMap.entries()].map(([emoji, senders]) => {
+    const count = senders.size;
+    const mine = senders.has('__me__');
+    return `<button class="reaction-pill${mine ? ' mine' : ''}" data-emoji="${escapeAttr(emoji)}" title="${mine ? 'Click to remove' : 'Click to react'}">${emoji} ${count}</button>`;
+  }).join('');
+}
+
+function attachReactionHandlers(rowEl, messageId) {
+  rowEl.querySelectorAll('.reaction-pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const emoji = btn.dataset.emoji;
+      if (selectedPeer) {
+        window.electronAPI.sendReaction(selectedPeer.id, messageId, emoji);
+      }
+      addReaction(messageId, emoji, '__me__', true);
+    });
+  });
+}
+
+function markMessageRead(messageId) {
+  messageReadStatus.set(messageId, true);
+  const tick = document.querySelector(`[data-msg-id="${messageId}"] .read-tick`);
+  if (tick) { tick.textContent = '✓✓'; tick.classList.add('read'); }
+}
+
 function appendMessage(item) {
   chatHistory.push(item);
   const emptyMsg = document.getElementById('chat-empty-msg');
@@ -1266,16 +1379,28 @@ function renderChatHistory() {
 }
 
 function buildMessageElement(item) {
+  const msgId = item.msgId || (item.msgId = 'msg-' + (++msgIdCounter));
   const div = document.createElement('div');
-  div.innerHTML = buildMessageHTML(item).trim();
-  return div.firstElementChild;
+  div.innerHTML = buildMessageHTML(item, msgId).trim();
+  const el = div.firstElementChild;
+  // Attach reaction pill handlers for any existing reactions
+  const rowEl = el.querySelector('.reaction-row');
+  if (rowEl) attachReactionHandlers(rowEl, msgId);
+  return el;
 }
 
-function buildMessageHTML(item) {
+function buildMessageHTML(item, msgId) {
   const isSent = item.type === 'sent' || item.subtype === 'sent';
+  msgId = msgId || item.msgId || ('msg-' + (++msgIdCounter));
+  item.msgId = msgId;
   const avatarHtml = item.senderAvatar
     ? `<img src="${item.senderAvatar}" class="message-avatar" alt="${escapeHtml(item.sender || '')}">`
     : `<div class="message-avatar-placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg></div>`;
+
+  const reactionMap = messageReactions.get(msgId) || new Map();
+  const reactionRow = `<div class="reaction-row">${buildReactionRowHTML(msgId, reactionMap)}</div>`;
+  const addReactionBtn = `<button class="add-reaction-btn" data-msg-id="${msgId}" title="Add reaction">😊</button>`;
+  const readTick = isSent ? `<span class="read-tick" title="Delivered">${messageReadStatus.get(msgId) ? '✓✓' : '✓'}</span>` : '';
 
   if (item.type === 'message') {
     const replyHtml = item.reply
@@ -1287,12 +1412,13 @@ function buildMessageHTML(item) {
            }</span>
          </div>`
       : '';
-    return `<div class="chat-message ${isSent ? 'sent' : 'received'}">
+    return `<div class="chat-message ${isSent ? 'sent' : 'received'}" data-msg-id="${msgId}">
       ${avatarHtml}
       <div class="message-content">
-        <div class="message-header"><span class="message-sender">${escapeHtml(item.sender || '')}</span><span class="message-time">${formatTime(item.timestamp)}</span></div>
+        <div class="message-header"><span class="message-sender">${escapeHtml(item.sender || '')}</span><span class="message-time">${formatTime(item.timestamp)}${readTick}</span></div>
         ${replyHtml}
         <div class="message-text message-text-only" data-text="${escapeAttr(item.message || '')}">${renderMarkdown(item.message || '')}</div>
+        ${reactionRow}${addReactionBtn}
       </div></div>`;
   }
 
@@ -1300,7 +1426,6 @@ function buildMessageHTML(item) {
   const fileIcon = getFileIcon(item.filename || '');
   let thumbHtml;
   if (item.thumbnail && item.thumbnail.startsWith('data:image')) {
-    // Real thumbnail (image or extracted video frame)
     const isVideo = ['mp4','webm','mov','avi','mkv','m4v','wmv','flv'].includes((item.filename||'').split('.').pop().toLowerCase());
     if (isVideo) {
       thumbHtml = `<div class="video-thumb-wrapper" style="cursor:pointer" title="Click to play"${item.path ? ` data-filepath="${escapeAttr(item.path)}"` : ''}>
@@ -1311,7 +1436,6 @@ function buildMessageHTML(item) {
       thumbHtml = `<img src="${item.thumbnail}" class="file-thumbnail" style="cursor:zoom-in" title="Click to expand" alt="">`;
     }
   } else if (item.thumbnail && item.thumbnail.startsWith('__video__:')) {
-    // Fallback: no frame extracted, show generic video icon
     thumbHtml = `<div class="file-thumbnail-video"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="28" height="28"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="2" y="5" width="14" height="14" rx="2"></rect></svg><span>Video</span></div>`;
   } else {
     thumbHtml = `<div class="file-icon-small">${fileIcon.icon}</div>`;
@@ -1321,10 +1445,10 @@ function buildMessageHTML(item) {
     ? `class="message-file message-file-clickable" data-filepath="${escapeAttr(item.path)}" title="Click to open • Right-click for options"`
     : `class="message-file"`;
 
-  return `<div class="chat-message ${isSent ? 'sent' : 'received'}">
+  return `<div class="chat-message ${isSent ? 'sent' : 'received'}" data-msg-id="${msgId}">
     ${avatarHtml}
     <div class="message-content">
-      <div class="message-header"><span class="message-sender">${escapeHtml(item.sender || '')}</span><span class="message-time">${formatTime(item.timestamp)}</span></div>
+      <div class="message-header"><span class="message-sender">${escapeHtml(item.sender || '')}</span><span class="message-time">${formatTime(item.timestamp)}${readTick}</span></div>
       ${item.message ? `<div class="message-text">${renderMarkdown(item.message)}</div>` : ''}
       <div ${fileAttrs}>
         ${thumbHtml}
@@ -1334,6 +1458,7 @@ function buildMessageHTML(item) {
           <div class="file-status">${isSent ? '✓ Sent' : '✓ Received' + (item.path ? ' — click to open' : '')}</div>
         </div>
       </div>
+      ${reactionRow}${addReactionBtn}
     </div></div>`;
 }
 
@@ -1373,6 +1498,7 @@ ctxMenu.addEventListener('click', e => {
   if (action === 'copy-text')      { navigator.clipboard.writeText(payload.text); showNotification('Copied!', 'success'); }
   if (action === 'copy-filename')  { navigator.clipboard.writeText(payload.text); showNotification('Copied!', 'success'); }
   if (action === 'reply-msg')      window._setReply?.(payload.sender, payload.text, payload.type);
+  if (action === 'react-msg')      showEmojiPicker(payload.x, payload.y, payload.msgId);
 });
 
 document.addEventListener('click', e => {
@@ -1405,8 +1531,10 @@ document.addEventListener('contextmenu', e => {
     const msgDiv = msgEl.closest('.chat-message');
     const sender = msgDiv?.querySelector('.message-sender')?.textContent || '';
     const fullText = msgEl.dataset.text || '';
+    const msgId = msgDiv?.dataset.msgId;
     showCtxMenu(e.clientX, e.clientY, [
       { icon:'↩', label:'Reply',     action:'reply-msg',  data:{ sender, text: fullText, type: 'text' } },
+      { icon:'😊', label:'React',     action:'react-msg',  data:{ msgId, x: e.clientX, y: e.clientY } },
       { icon:'📋', label:'Copy text', action:'copy-text',  data:{ text: sel || fullText } },
     ]);
     return;
@@ -1431,239 +1559,423 @@ document.addEventListener('contextmenu', e => {
     return;
   }
 });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { hideCtxMenu(); hideEmojiPicker(); } });
 document.addEventListener('scroll', hideCtxMenu, true);
 
 // ============================================================
-// WAN UI
+// EMOJI REACTION PICKER
 // ============================================================
-// ══ WAN / Internet transfer UI ═══════════════════════════════
-// Primary:  UPnP  (U~ code, single code, direct TCP)
-// Fallback: WebRTC (E1~ code, two-step exchange)
+// ============================================================
+// FULL EMOJI PICKER
+// ============================================================
+// Modes: 'reaction' (attaches to a message) | 'insert' (inserts into textarea)
 
-let wanSelectedFile  = null;  // { path, name, size }
-let rtcTransfer      = null;  // RTCTransfer instance (fallback)
+const RECENT_KEY   = 'emoji-recent-v1';
+const CUSTOM_KEY   = 'emoji-custom-v1';
+const MAX_RECENT   = 32;
 
-function initWAN() {
-  // ── Drop zone ──────────────────────────────────────────────
-  const dropZone = document.getElementById('wan-drop-zone');
-  const fileInput = document.getElementById('wan-file-input');
-  dropZone.addEventListener('click', () => fileInput.click());
-  dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-  dropZone.addEventListener('drop', e => {
-    e.preventDefault(); dropZone.classList.remove('drag-over');
-    const f = e.dataTransfer.files[0]; if (f) wanSelectFile(f);
-  });
-  fileInput.addEventListener('change', e => { if (e.target.files[0]) wanSelectFile(e.target.files[0]); fileInput.value = ''; });
-
-  // ── Send buttons ───────────────────────────────────────────
-  document.getElementById('wan-send-cancel').addEventListener('click', wanSendReset);
-  document.getElementById('rtc-connect-btn').addEventListener('click', rtcSenderConnect);
-  document.getElementById('rtc-answer-in').addEventListener('keypress', e => { if (e.key === 'Enter') rtcSenderConnect(); });
-
-  // ── Receive ────────────────────────────────────────────────
-  document.getElementById('wan-recv-btn').addEventListener('click', wanReceive);
-  document.getElementById('wan-recv-input').addEventListener('keypress', e => { if (e.key === 'Enter') wanReceive(); });
-
-  // ── Copy buttons ───────────────────────────────────────────
-  document.querySelectorAll('.copy-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const el = document.getElementById(btn.dataset.target);
-      if (el?.value) { navigator.clipboard.writeText(el.value); showNotification('Copied!', 'success'); }
-    });
-  });
-
-  // ── UPnP events ────────────────────────────────────────────
-  window.electronAPI.onUpnpConnected(() => {
-    document.getElementById('upnp-send-status').style.display = 'flex';
-    document.getElementById('upnp-send-status-text').textContent = 'Connected — sending…';
-    document.getElementById('upnp-send-progress').style.display = 'flex';
-  });
-  window.electronAPI.onUpnpProgress(d => {
-    if (d.pct !== undefined) {
-      const pct = Math.round(d.pct);
-      document.getElementById('upnp-send-fill').style.width = pct + '%';
-      document.getElementById('upnp-send-pct').textContent  = pct + '%';
-    }
-    if (d.received !== undefined) {
-      // receiver side
-      const pct = Math.round(d.pct);
-      document.getElementById('wan-recv-fill').style.width = pct + '%';
-      document.getElementById('wan-recv-pct').textContent  = pct + '%';
-      document.getElementById('wan-recv-status').textContent = `Receiving… ${formatBytes(d.received)} / ${formatBytes(d.total)}`;
-    }
-  });
-  window.electronAPI.onUpnpReceiveStart(d => {
-    document.getElementById('wan-recv-filepill').style.display = 'block';
-    document.getElementById('wan-recv-filepill').textContent   = `${d.filename}  (${formatBytes(d.size)})`;
-    document.getElementById('wan-recv-status').textContent = 'Receiving…';
-  });
-  window.electronAPI.onUpnpDone(d => {
-    showNotification('Transfer complete: ' + (d.filename || d.size + ' bytes'), 'success');
-    document.getElementById('upnp-send-dot').style.background = 'var(--accent)';
-    document.getElementById('upnp-send-status-text').textContent = '✓ Transfer complete';
-    document.getElementById('wan-recv-dot').style.background = 'var(--accent)';
-    document.getElementById('wan-recv-status').textContent = '✓ Saved to Downloads';
-  });
-  window.electronAPI.onUpnpError(d => {
-    showNotification('Transfer error: ' + d.message, 'error');
-  });
-
-  // ── WebRTC events ──────────────────────────────────────────
-  window.electronAPI.onRtcSaved(d => {
-    showNotification('Saved: ' + d.name, 'success');
-    document.getElementById('wan-recv-status').textContent = '✓ Saved to Downloads';
-    document.getElementById('wan-recv-dot').style.background = 'var(--accent)';
-  });
+function getRecentEmojis() {
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); } catch { return []; }
+}
+function addToRecent(emoji) {
+  let list = getRecentEmojis().filter(e => e !== emoji);
+  list.unshift(emoji);
+  if (list.length > MAX_RECENT) list = list.slice(0, MAX_RECENT);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+}
+function getCustomEmojis() {
+  try { return JSON.parse(localStorage.getItem(CUSTOM_KEY) || '[]'); } catch { return []; }
+}
+function saveCustomEmojis(list) {
+  localStorage.setItem(CUSTOM_KEY, JSON.stringify(list));
 }
 
-// ── File selected for sending ──────────────────────────────────
-async function wanSelectFile(f) {
-  wanSelectedFile = { path: f.path, name: f.name, size: f.size };
-  document.getElementById('wan-drop-zone').style.display = 'none';
-  document.getElementById('wan-send-ready').style.display = 'block';
-  document.getElementById('wan-send-filepill').textContent = `${f.name}  (${formatBytes(f.size)})`;
-  document.getElementById('upnp-offer-out').value = '';
-  document.getElementById('upnp-send-hint').textContent = 'Contacting your router via UPnP…';
-  document.getElementById('upnp-send-panel').style.display = 'block';
-  document.getElementById('upnp-fallback-panel').style.display = 'none';
+// ── Build picker DOM ─────────────────────────────────────────
+const emojiPickerEl = (() => {
+  const el = document.createElement('div');
+  el.id = 'emoji-picker-full';
+  el.innerHTML = `
+    <div class="ep-header">
+      <input class="ep-search" type="text" placeholder="Search emoji…" autocomplete="off" spellcheck="false">
+      <button class="ep-custom-add" title="Add custom emoji">＋</button>
+    </div>
+    <div class="ep-cats"></div>
+    <div class="ep-grid-wrap">
+      <div class="ep-grid"></div>
+    </div>
+  `;
+  document.body.appendChild(el);
+  return el;
+})();
 
-  // Try UPnP first
-  try {
-    const result = await window.electronAPI.upnpSendInit(f.path);
-    if (!result.success) throw new Error(result.error);
-    document.getElementById('upnp-offer-out').value = result.code;
-    document.getElementById('upnp-send-hint').textContent =
-      `Code ready (${result.code.length} chars) — one code, no reply needed ✓`;
-    document.getElementById('upnp-send-status').style.display = 'flex';
-  } catch (err) {
-    console.warn('[UPnP] failed, falling back to WebRTC:', err.message);
-    // UPnP failed — show WebRTC fallback
-    document.getElementById('upnp-send-panel').style.display = 'none';
-    document.getElementById('upnp-fallback-panel').style.display = 'block';
-    await rtcInitSend();
+const epSearch   = emojiPickerEl.querySelector('.ep-search');
+const epCats     = emojiPickerEl.querySelector('.ep-cats');
+const epGrid     = emojiPickerEl.querySelector('.ep-grid');
+const epCustomAdd = emojiPickerEl.querySelector('.ep-custom-add');
+
+let epActiveCat  = 'smileys';
+let epMode       = 'insert'; // 'insert' | 'reaction'
+let epMsgId      = null;
+let epOpen       = false;
+
+function buildCatTabs() {
+  const cats = window.EMOJI_CATEGORIES || [];
+  epCats.innerHTML = cats.map(c =>
+    `<button class="ep-cat${c.id === epActiveCat ? ' active' : ''}" data-cat="${c.id}" title="${c.title}">${c.label}</button>`
+  ).join('');
+}
+
+function getGridEmojis(catId, searchTerm) {
+  const cats = window.EMOJI_CATEGORIES || [];
+  if (searchTerm) {
+    // Search across all categories (fuzzy match by checking if emoji name includes term)
+    // Since we don't have names, search within the flat string list by unicode match
+    const all = cats.filter(c => c.id !== 'recent' && c.id !== 'custom').flatMap(c => c.emojis);
+    const custom = getCustomEmojis();
+    return [...custom, ...all].filter(e => e.toLowerCase().includes(searchTerm.toLowerCase())).slice(0, 100);
+  }
+  if (catId === 'recent') {
+    const r = getRecentEmojis();
+    return r.length ? r : ['😀','👍','❤️','🎉','🔥','😂','😊','🙏','✅','💯'];
+  }
+  if (catId === 'custom') return getCustomEmojis();
+  return cats.find(c => c.id === catId)?.emojis || [];
+}
+
+function renderGrid(catId, searchTerm = '') {
+  const emojis = getGridEmojis(catId, searchTerm);
+  if (emojis.length === 0 && catId === 'custom') {
+    epGrid.innerHTML = `<div class="ep-empty">No custom emoji yet.<br>Click ＋ to add one.</div>`;
+    return;
+  }
+  if (emojis.length === 0) {
+    epGrid.innerHTML = `<div class="ep-empty">No results</div>`;
+    return;
+  }
+  epGrid.innerHTML = emojis.map(e => {
+    const isCustom = e.startsWith('data:') || (e.length > 10 && !e.includes('️'));
+    if (isCustom && e.startsWith('data:')) {
+      // Custom image emoji - stored as {src, name} or just data URL
+      return ''; // handled below with object format
+    }
+    return `<button class="ep-emoji" data-emoji="${escapeAttr(e)}">${e}</button>`;
+  }).join('');
+
+  // Handle object-format custom emojis
+  const custom = getCustomEmojis();
+  if (catId === 'custom' && custom.length) {
+    epGrid.innerHTML = custom.map((item, i) => {
+      if (typeof item === 'object' && item.src) {
+        return `<button class="ep-emoji ep-custom-img" data-emoji="${escapeAttr(item.name || item.src)}" data-src="${escapeAttr(item.src)}" title="${escapeAttr(item.name || 'custom')}" data-custom-idx="${i}"><img src="${escapeAttr(item.src)}" style="width:1.5rem;height:1.5rem;object-fit:contain;border-radius:3px;"></button>`;
+      }
+      return `<button class="ep-emoji" data-emoji="${escapeAttr(item)}">${item}</button>`;
+    }).join('');
   }
 }
 
-// ── WebRTC send (fallback) ─────────────────────────────────────
-async function rtcInitSend() {
-  rtcTransfer = new RTCTransfer();
-  try {
-    const code = await rtcTransfer.initSend(wanSelectedFile);
-    document.getElementById('rtc-offer-out').value = code;
-    const step2 = document.getElementById('rtc-step2-send');
-    step2.style.opacity = '1'; step2.style.pointerEvents = 'auto';
-  } catch (err) {
-    showNotification('Failed to generate transfer code: ' + err.message, 'error');
-  }
+function showEmojiPickerFull(anchorEl, mode, msgId) {
+  epMode  = mode;
+  epMsgId = msgId || null;
+  epOpen  = true;
+  epSearch.value = '';
+  buildCatTabs();
+  renderGrid(epActiveCat);
+
+  // Position near anchor
+  const rect = anchorEl.getBoundingClientRect();
+  emojiPickerEl.style.display = 'flex';
+  // After display, measure and position
+  requestAnimationFrame(() => {
+    const pw = emojiPickerEl.offsetWidth  || 320;
+    const ph = emojiPickerEl.offsetHeight || 360;
+    let left = rect.left;
+    let top  = rect.top - ph - 8;
+    if (left + pw > window.innerWidth - 8)  left = window.innerWidth - pw - 8;
+    if (top < 8) top = rect.bottom + 8;
+    if (left < 8) left = 8;
+    emojiPickerEl.style.left = left + 'px';
+    emojiPickerEl.style.top  = top  + 'px';
+  });
+  epSearch.focus();
 }
 
-async function rtcSenderConnect() {
-  const code = document.getElementById('rtc-answer-in').value.trim();
-  if (!code) { showNotification('Paste the reply code first', 'error'); return; }
-  document.getElementById('rtc-send-progress-wrap').style.display = 'block';
-  document.getElementById('rtc-send-status').textContent = 'Connecting…';
-
-  rtcTransfer
-    .on('connected',    ()  => { document.getElementById('rtc-send-status').textContent = 'Connected — sending…'; })
-    .on('sendStart',    ()  => {})
-    .on('progress',     p   => {
-      const pct = Math.round(p.pct);
-      document.getElementById('rtc-send-fill').style.width = pct + '%';
-      document.getElementById('rtc-send-pct').textContent  = pct + '%';
-      document.getElementById('rtc-send-status').textContent = `Sending… ${formatBytes(p.sent)} / ${formatBytes(p.total)}`;
-    })
-    .on('done',         ()  => {
-      document.getElementById('rtc-send-status').textContent = '✓ Transfer complete';
-      document.getElementById('rtc-send-dot').style.background = 'var(--accent)';
-      showNotification('File sent!', 'success');
-    })
-    .on('error',        err => showNotification('Transfer error: ' + err.message, 'error'));
-
-  try { await rtcTransfer.acceptAnswer(code); }
-  catch (err) { showNotification('Bad reply code: ' + err.message, 'error'); }
+function hideEmojiPicker() {
+  emojiPickerEl.style.display = 'none';
+  epOpen = false;
+  epMsgId = null;
 }
 
-// ── Receive: detect code type and handle ──────────────────────
-async function wanReceive() {
-  const code = document.getElementById('wan-recv-input').value.trim();
-  if (!code) { showNotification('Paste a transfer code first', 'error'); return; }
+// For backwards compat with old call sites
+function showEmojiPicker(x, y, msgId) {
+  // Create a temporary anchor-like object
+  const anchor = { getBoundingClientRect: () => ({ left: x, top: y, bottom: y + 28, right: x + 28 }) };
+  epMode  = 'reaction';
+  epMsgId = msgId;
+  showEmojiPickerFull(anchor, 'reaction', msgId);
+}
 
-  document.getElementById('wan-recv-progress').style.display = 'block';
-  document.getElementById('wan-recv-status').textContent = 'Connecting…';
-  document.getElementById('wan-recv-btn').disabled = true;
-  document.getElementById('wan-recv-hint').style.display = 'none';
-
-  if (code.startsWith('U~')) {
-    // UPnP direct — just connect
-    const result = await window.electronAPI.upnpReceiveInit(code);
-    if (!result.success && !result.canceled) {
-      showNotification('Failed: ' + result.error, 'error');
-      document.getElementById('wan-recv-btn').disabled = false;
-    }
-    // progress/done come through events
-  } else if (code.startsWith('E1~')) {
-    // WebRTC — need to generate a reply
-    await rtcReceiverGenAnswer(code);
+function onEmojiSelected(emoji) {
+  addToRecent(emoji);
+  if (epMode === 'reaction' && epMsgId) {
+    if (selectedPeer) window.electronAPI.sendReaction(selectedPeer.id, epMsgId, emoji);
+    addReaction(epMsgId, emoji, '__me__', true);
+    hideEmojiPicker();
   } else {
-    showNotification('Unrecognised code format', 'error');
-    document.getElementById('wan-recv-btn').disabled = false;
-    document.getElementById('wan-recv-progress').style.display = 'none';
+    // Insert mode — insert into textarea at cursor
+    const ta = document.getElementById('message-input');
+    if (ta) {
+      const start = ta.selectionStart;
+      const end   = ta.selectionEnd;
+      const val   = ta.value;
+      ta.value = val.slice(0, start) + emoji + val.slice(end);
+      ta.selectionStart = ta.selectionEnd = start + emoji.length;
+      ta.dispatchEvent(new Event('input'));
+      ta.focus();
+    }
+    // Don't close on insert — let user pick multiple
   }
 }
 
-async function rtcReceiverGenAnswer(code) {
-  document.getElementById('wan-recv-status').textContent = 'Generating reply code…';
+// ── Picker event handlers ──────────────────────────────────
+epGrid.addEventListener('click', e => {
+  const btn = e.target.closest('.ep-emoji');
+  if (!btn) return;
+  e.stopPropagation();
+  // Right-click on custom emoji to delete (handled by contextmenu below)
+  const emoji = btn.dataset.emoji;
+  onEmojiSelected(emoji);
+});
 
-  rtcTransfer = new RTCTransfer();
-  rtcTransfer
-    .on('connected',    ()  => { document.getElementById('wan-recv-status').textContent = 'Connected — receiving…'; })
-    .on('receiveStart', m   => {
-      document.getElementById('wan-recv-filepill').style.display = 'block';
-      document.getElementById('wan-recv-filepill').textContent   = `${m.name}  (${formatBytes(m.size)})`;
-    })
-    .on('progress',     p   => {
-      const pct = Math.round(p.pct);
-      document.getElementById('wan-recv-fill').style.width = pct + '%';
-      document.getElementById('wan-recv-pct').textContent  = pct + '%';
-      document.getElementById('wan-recv-status').textContent = `Receiving… ${formatBytes(p.received)} / ${formatBytes(p.total)}`;
-    })
-    .on('done',         ()  => {
-      document.getElementById('wan-recv-dot').style.background = 'var(--accent)';
-      document.getElementById('wan-recv-status').textContent = '✓ Done — saving…';
-    })
-    .on('error',        err => showNotification('Transfer error: ' + err.message, 'error'));
+epGrid.addEventListener('contextmenu', e => {
+  const btn = e.target.closest('.ep-custom-img');
+  if (!btn) return;
+  e.preventDefault();
+  const idx = parseInt(btn.dataset.customIdx);
+  if (confirm(`Remove this custom emoji?`)) {
+    const list = getCustomEmojis();
+    list.splice(idx, 1);
+    saveCustomEmojis(list);
+    renderGrid('custom');
+  }
+});
 
+epCats.addEventListener('click', e => {
+  const btn = e.target.closest('.ep-cat');
+  if (!btn) return;
+  epActiveCat = btn.dataset.cat;
+  epSearch.value = '';
+  buildCatTabs();
+  renderGrid(epActiveCat);
+});
+
+let epSearchTimer;
+epSearch.addEventListener('input', () => {
+  clearTimeout(epSearchTimer);
+  epSearchTimer = setTimeout(() => {
+    const term = epSearch.value.trim();
+    if (term) {
+      renderGrid(null, term);
+    } else {
+      renderGrid(epActiveCat);
+    }
+  }, 120);
+});
+epSearch.addEventListener('keydown', e => { e.stopPropagation(); }); // prevent global shortcuts
+
+// ── Custom emoji upload ────────────────────────────────────
+epCustomAdd.addEventListener('click', e => {
+  e.stopPropagation();
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = async () => {
+    const file = input.files[0];
+    if (!file) return;
+    if (file.size > 256 * 1024) { showNotification('Custom emoji must be under 256KB', 'error'); return; }
+    const name = prompt('Short name for this emoji (e.g. "myface"):', file.name.replace(/\.[^.]+$/, '')) || file.name;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const list = getCustomEmojis();
+      list.push({ src: ev.target.result, name: ':' + name.replace(/[^a-z0-9_-]/gi,'') + ':' });
+      saveCustomEmojis(list);
+      epActiveCat = 'custom';
+      buildCatTabs();
+      renderGrid('custom');
+      showNotification('Custom emoji added!', 'success');
+    };
+    reader.readAsDataURL(file);
+  };
+  input.click();
+});
+
+// ── Global click outside to close ─────────────────────────
+document.addEventListener('click', e => {
+  if (epOpen && !emojiPickerEl.contains(e.target)) {
+    const addBtn = e.target.closest('.add-reaction-btn');
+    const insertBtn = e.target.closest('#emoji-insert-btn');
+    if (!addBtn && !insertBtn) hideEmojiPicker();
+  }
+  // Chat emoji insert button
+  const insertBtn = e.target.closest('#emoji-insert-btn');
+  if (insertBtn) {
+    e.stopPropagation();
+    if (epOpen && epMode === 'insert') { hideEmojiPicker(); return; }
+    showEmojiPickerFull(insertBtn, 'insert', null);
+    return;
+  }
+  // Reaction button on message hover
+  const addBtn = e.target.closest('.add-reaction-btn');
+  if (addBtn) {
+    e.stopPropagation();
+    if (epOpen && epMsgId === addBtn.dataset.msgId) { hideEmojiPicker(); return; }
+    showEmojiPickerFull(addBtn, 'reaction', addBtn.dataset.msgId);
+    return;
+  }
+}, true);
+
+
+
+// ============================================================
+// CLIPBOARD IMAGE PASTE
+// ============================================================
+document.addEventListener('paste', async (e) => {
+  if (!selectedPeer) return;
+  const items = Array.from(e.clipboardData?.items || []);
+  const imageItem = items.find(i => i.type.startsWith('image/'));
+  if (!imageItem) return;
+  e.preventDefault();
+  const blob = imageItem.getAsFile();
+  if (!blob) return;
+
+  const reader = new FileReader();
+  reader.onload = async (ev) => {
+    const dataUrl = ev.target.result;
+    const ext = imageItem.type.split('/')[1] || 'png';
+    const filename = `paste-${new Date().toISOString().replace(/[:.]/g,'-')}.${ext}`;
+    const result = await window.electronAPI.saveClipboardImage(dataUrl, filename);
+    if (!result.success) { showNotification('Failed to save pasted image', 'error'); return; }
+    // Show preview in input area briefly
+    showNotification('Sending pasted image…', 'success');
+    await handleSingleFilePath(result.filePath);
+  };
+  reader.readAsDataURL(blob);
+});
+
+// Send a file by path (used by clipboard paste + drag-drop)
+async function handleSingleFilePath(filePath) {
+  if (!selectedPeer) return;
+  const message = messageInput?.value?.trim() || '';
+  if (message && messageInput) messageInput.value = '';
   try {
-    const answerCode = await rtcTransfer.initReceive(code);
-    document.getElementById('rtc-step2-recv').style.display = 'block';
-    document.getElementById('rtc-answer-out').value = answerCode;
-    document.getElementById('wan-recv-status').textContent = 'Reply code ready — paste it back to sender';
-    showNotification(`Reply code ready (${answerCode.length} chars)`, 'success');
-  } catch (err) {
-    showNotification('Bad offer code: ' + err.message, 'error');
-    document.getElementById('wan-recv-btn').disabled = false;
-    document.getElementById('wan-recv-progress').style.display = 'none';
+    await window.electronAPI.sendFile({ peerId: selectedPeer.id, filePath, message });
+  } catch (err) { showNotification('Failed to send: ' + err.message, 'error'); }
+}
+
+
+
+// WAN direct peers are stored in localStorage and re-injected into
+// the network manager on startup so they work exactly like LAN peers.
+const WAN_DIRECT_STORAGE_KEY = 'wan-direct-peers-v1';
+
+function loadWanDirectPeersFromStorage() {
+  try { return JSON.parse(localStorage.getItem(WAN_DIRECT_STORAGE_KEY) || '[]'); } catch { return []; }
+}
+function saveWanDirectPeersToStorage(list) {
+  localStorage.setItem(WAN_DIRECT_STORAGE_KEY, JSON.stringify(list));
+}
+
+// Re-inject persisted WAN direct peers into networkManager on startup
+async function restoreWanDirectPeers() {
+  const saved = loadWanDirectPeersFromStorage();
+  for (const p of saved) {
+    await window.electronAPI.wanDirectAddPeer(p.id, p.ip, p.port, p.label).catch(() => {});
   }
 }
 
-function wanSendReset() {
-  window.electronAPI.upnpSendCancel?.();
-  if (rtcTransfer) { rtcTransfer.close(); rtcTransfer = null; }
-  wanSelectedFile = null;
-  document.getElementById('wan-drop-zone').style.display = 'flex';
-  document.getElementById('wan-send-ready').style.display = 'none';
-  document.getElementById('upnp-offer-out').value = '';
-  document.getElementById('rtc-offer-out').value = '';
-  document.getElementById('rtc-answer-in').value = '';
-  document.getElementById('upnp-send-progress').style.display = 'none';
-  document.getElementById('rtc-send-progress-wrap').style.display = 'none';
-  const step2 = document.getElementById('rtc-step2-send');
-  step2.style.opacity = '0.4'; step2.style.pointerEvents = 'none';
+function initWANPeerModal() {
+  const btn     = document.getElementById('add-wan-peer-btn');
+  const modal   = document.getElementById('add-wan-peer-modal');
+  const closeBtn = document.getElementById('add-wan-peer-close');
+  if (!btn || !modal) return;
+
+  // Open modal + fetch our address
+  btn.addEventListener('click', async () => {
+    const addrEl  = document.getElementById('my-wan-address');
+    const hintEl  = document.getElementById('my-wan-address-hint');
+    if (addrEl) { addrEl.value = 'Fetching…'; }
+    if (hintEl) hintEl.textContent = '';
+    modal.style.display = 'flex';
+
+    try {
+      const res = await window.electronAPI.wanDirectGetMyAddress();
+      if (addrEl) addrEl.value = res.address || '';
+      if (hintEl) {
+        if (res.method === 'upnp') {
+          hintEl.textContent = '✓ Port opened via UPnP — share this with your peer';
+          hintEl.style.color = '#4ade80';
+        } else {
+          hintEl.textContent = `⚠ UPnP unavailable — this is your local IP. Your peer needs to be on the same network, or use your router's public IP with port ${res.port} forwarded manually.`;
+          hintEl.style.color = '#fb923c';
+        }
+      }
+    } catch (err) {
+      if (addrEl) addrEl.value = 'Error: ' + err.message;
+    }
+  });
+
+  closeBtn.addEventListener('click', () => modal.style.display = 'none');
+  modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
+
+  document.getElementById('copy-my-wan-address')?.addEventListener('click', () => {
+    const val = document.getElementById('my-wan-address')?.value;
+    if (val && !val.startsWith('Fetch') && !val.startsWith('Error')) {
+      navigator.clipboard.writeText(val);
+      showNotification('Address copied!', 'success');
+    }
+  });
+
+  document.getElementById('wan-peer-add')?.addEventListener('click', addWanDirectPeer);
+  document.getElementById('wan-peer-address')?.addEventListener('keypress', e => {
+    if (e.key === 'Enter') addWanDirectPeer();
+  });
 }
 
+async function addWanDirectPeer() {
+  const addrRaw = document.getElementById('wan-peer-address')?.value?.trim();
+  const label   = document.getElementById('wan-peer-label')?.value?.trim() || '';
+  if (!addrRaw) { showNotification('Enter an ip:port address', 'error'); return;  }
 
+  // Parse ip:port — handle IPv6 [::1]:port too
+  let ip, port;
+  const ipv6Match = addrRaw.match(/^\[(.+)\]:(\d+)$/);
+  if (ipv6Match) { ip = ipv6Match[1]; port = parseInt(ipv6Match[2]); }
+  else {
+    const lastColon = addrRaw.lastIndexOf(':');
+    if (lastColon === -1) { showNotification('Format should be ip:port', 'error'); return; }
+    ip = addrRaw.slice(0, lastColon);
+    port = parseInt(addrRaw.slice(lastColon + 1));
+  }
+  if (!ip || !port || isNaN(port)) { showNotification('Invalid address format', 'error'); return; }
+
+  const id = 'wand-' + Date.now();
+  const displayLabel = label || `${ip}:${port}`;
+
+  const result = await window.electronAPI.wanDirectAddPeer(id, ip, port, displayLabel);
+  if (!result.success) { showNotification('Failed: ' + result.error, 'error'); return; }
+
+  // Persist so it survives restarts
+  const saved = loadWanDirectPeersFromStorage();
+  saved.push({ id, ip, port, label: displayLabel });
+  saveWanDirectPeersToStorage(saved);
+
+  // Clear inputs + close modal
+  document.getElementById('wan-peer-address').value = '';
+  document.getElementById('wan-peer-label').value = '';
+  document.getElementById('add-wan-peer-modal').style.display = 'none';
+
+  showNotification(`${displayLabel} added`, 'success');
+  // peer-discovered event will fire from main process, renderPeers auto-updates
+}
 // ============================================================
 // THEME SYSTEM
 // ============================================================

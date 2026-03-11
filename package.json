@@ -32,7 +32,9 @@
       "package.json",
       "node_modules/**/*",
       "upnp-client.js",
-      "upnp-transfer.js"
+      "upnp-transfer.js",
+      "cert-gen.js",
+      "emoji-data.js"
     ],
     "compression": "normal",
     "win": {

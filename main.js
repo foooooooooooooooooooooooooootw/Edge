@@ -34,6 +34,8 @@ app.whenReady().then(() => {
   networkManager.on('transfer-complete', d => mainWindow.webContents.send('transfer-complete', d));
   networkManager.on('message-received', d => mainWindow.webContents.send('message-received', d));
   networkManager.on('typing-received',   d => mainWindow.webContents.send('typing-received', d));
+  networkManager.on('reaction-received', d => mainWindow.webContents.send('reaction-received', d));
+  networkManager.on('read-receipt',      d => mainWindow.webContents.send('read-receipt', d));
 
   networkManager.on('file-incoming', async (data) => {
     // Guard: ignore malformed events with no filename (e.g. stray message-type packets)
@@ -162,10 +164,25 @@ ipcMain.handle('accept-file', async (e, { transferId }) => {
 ipcMain.handle('decline-file', async (e, { transferId }) => { networkManager.discardReceivedFile(transferId); return { success: true }; });
 ipcMain.handle('get-receive-mode', async () => networkManager.getReceiveMode());
 ipcMain.handle('set-receive-mode', async (e, mode) => { networkManager.setReceiveMode(mode); return { success: true }; });
+ipcMain.handle('get-encrypt-lan', async () => ({ enabled: networkManager.getEncryptLAN(), fingerprint: networkManager.getMyFingerprint() }));
+ipcMain.handle('set-encrypt-lan', async (e, enabled) => { networkManager.setEncryptLAN(enabled); return { success: true }; });
+ipcMain.handle('send-reaction', async (e, { peerId, messageId, emoji }) => { await networkManager.sendReaction(peerId, messageId, emoji); return { success: true }; });
+ipcMain.handle('send-read-receipt', async (e, { peerId, messageId }) => { await networkManager.sendReadReceipt(peerId, messageId); return { success: true }; });
 ipcMain.handle('open-file', async (e, { filePath }) => {
   const { shell } = require('electron');
   try { await shell.openPath(filePath); return { success: true }; }
   catch (err) { return { success: false, error: err.message }; }
+});
+// Save a base64 image blob from clipboard paste to a temp file for sending
+ipcMain.handle('save-clipboard-image', async (e, { dataUrl, filename }) => {
+  try {
+    const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+    const tmpDir = path.join(app.getPath('temp'), 'edge-clipboard');
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    const filePath = path.join(tmpDir, filename || `paste-${Date.now()}.png`);
+    fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
+    return { success: true, filePath };
+  } catch (err) { return { success: false, error: err.message }; }
 });
 ipcMain.handle('show-in-folder', async (e, { filePath }) => { const { shell } = require('electron'); shell.showItemInFolder(filePath); return { success: true }; });
 
@@ -250,6 +267,42 @@ ipcMain.handle('upnp-receive-init', async (_e, { code }) => {
   } catch (err) {
     return { success: false, error: err.message };
   }
+});
+
+// ==================== WAN Direct IPC ====================
+// Get your own shareable address (UPnP maps the transfer port so WAN peers can connect)
+ipcMain.handle('wan-direct-get-my-address', async () => {
+  const { UPnPClient, getLocalIp } = require('./upnp-client');
+  const localIp = getLocalIp();
+  const transferPort = networkManager.getTransferPort();
+
+  // Try UPnP to get public IP + open port
+  try {
+    const upnp = new UPnPClient();
+    await upnp.init();
+    const [publicIp] = await Promise.all([
+      upnp.getExternalIP(),
+      upnp.addPortMappingWithFallback(transferPort, 'Edge-Direct'),
+    ]);
+    if (publicIp) return { success: true, address: `${publicIp}:${transferPort}`, publicIp, localIp, port: transferPort, method: 'upnp' };
+  } catch (e) { /* UPnP unavailable */ }
+
+  // Fallback — return local IP (works on same LAN, but user knows their WAN IP)
+  return { success: true, address: `${localIp}:${transferPort}`, publicIp: null, localIp, port: transferPort, method: 'local' };
+});
+
+// Add a WAN direct peer — injects into the same peer map LAN uses
+ipcMain.handle('wan-direct-add-peer', async (_e, { id, ip, port, label }) => {
+  try {
+    const peer = networkManager.addWanDirectPeer(id, ip, parseInt(port), label);
+    return { success: true, peer };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+// Remove a WAN direct peer
+ipcMain.handle('wan-direct-remove-peer', async (_e, { id }) => {
+  networkManager.removeWanDirectPeer(id);
+  return { success: true };
 });
 
 // ==================== WAN IPC ====================
