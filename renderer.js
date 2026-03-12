@@ -798,6 +798,20 @@ function setupElectronListeners() {
   window.electronAPI.onReadReceipt?.((data) => {
     markMessageRead(data.messageId);
   });
+
+  // WAN connection method — update the badge in the chat header
+  window.electronAPI.onWanConnectionMethod?.((data) => {
+    wanConnectionMethods.set(data.peerId, data.method);
+    if (selectedPeer && selectedPeer.id === data.peerId) {
+      updateChatHeader();
+    }
+    // Only notify for non-TCP methods — TCP is the silent happy path
+    if (data.method === 'direct') {
+      showNotification('⚡ Direct UDP connection established', 'success');
+    } else if (data.method === 'relay') {
+      showNotification('🔄 Connected via relay (NAT traversal fallback)', 'success');
+    }
+  });
 }
 
 async function loadPeers() {
@@ -981,6 +995,9 @@ function renderPeerItem(peer, type) {
 }
 
 
+// Track WAN connection methods: peerId → 'direct'|'relay'|'tcp'
+const wanConnectionMethods = new Map();
+
 function updateChatHeader() {
   if (!selectedPeer) {
     chatHeader.innerHTML = '';
@@ -1003,7 +1020,6 @@ function updateChatHeader() {
   const emptyState = document.getElementById('chat-empty-state');
   if (emptyState) emptyState.remove();
 
-  // WAN direct peers behave identically to LAN peers — same chat, same input, same file drop
   const isWanDirect = selectedPeer.isWanDirect;
   const avatarHtml = selectedPeer.avatar
     ? `<img src="${selectedPeer.avatar}" class="chat-peer-avatar" alt="${escapeHtml(selectedPeer.username)}">`
@@ -1013,9 +1029,24 @@ function updateChatHeader() {
            : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`
          }
        </div>`;
+
   const displayName = selectedPeer.nickname || selectedPeer.username;
+
+  // Connection method badge for WAN peers
+  let connBadge = '';
+  if (isWanDirect) {
+    const method = wanConnectionMethods.get(selectedPeer.id);
+    if (method === 'direct') {
+      connBadge = `<span class="wan-conn-badge direct" title="Direct UDP connection">⚡ UDP</span>`;
+    } else if (method === 'relay') {
+      connBadge = `<span class="wan-conn-badge relay" title="Relayed through peer">🔄 Relay</span>`;
+    } else if (method === 'tcp') {
+      connBadge = `<span class="wan-conn-badge tcp" title="Direct TCP connection">🔗 TCP</span>`;
+    }
+  }
+
   const subtitle = isWanDirect
-    ? `${selectedPeer.ip}:${selectedPeer.port} <span class="wan-badge">WAN</span>`
+    ? `${selectedPeer.ip}:${selectedPeer.port} <span class="wan-badge">WAN</span>${connBadge}`
     : selectedPeer.ip;
 
   chatHeader.innerHTML = `
@@ -1917,7 +1948,11 @@ function saveWanDirectPeersToStorage(list) {
 async function restoreWanDirectPeers() {
   const saved = loadWanDirectPeersFromStorage();
   for (const p of saved) {
-    await window.electronAPI.wanDirectAddPeer(p.id, p.ip, p.port, p.label).catch(() => {});
+    await window.electronAPI.wanDirectAddPeer(p.id, p.ip, p.port, p.label, {
+      token: p.token || null,
+      relayIp: p.relayIp || null,
+      relayPort: p.relayPort || null,
+    }).catch(() => {});
   }
 }
 
@@ -1940,11 +1975,24 @@ function initWANPeerModal() {
       if (addrEl) addrEl.value = res.address || '';
       if (hintEl) {
         if (res.method === 'upnp') {
-          hintEl.textContent = '✓ Port opened via UPnP — share this with your peer';
+          const relayNote = res.hasRelay
+            ? ` · 🔄 Relay server active on port ${res.relayPort}`
+            : '';
+          hintEl.textContent = `✓ Port opened via UPnP — share this with your peer${relayNote}`;
           hintEl.style.color = '#4ade80';
         } else {
           hintEl.textContent = `⚠ UPnP unavailable — this is your local IP. Your peer needs to be on the same network, or use your router's public IP with port ${res.port} forwarded manually.`;
           hintEl.style.color = '#fb923c';
+        }
+      }
+      // If we have a relay, show a note about what token will be issued when they add the peer
+      const relayInfoEl = document.getElementById('relay-status-note');
+      if (relayInfoEl) {
+        if (res.hasRelay) {
+          relayInfoEl.textContent = '🔄 You have a relay — a token will be generated when you add this peer. They just need to paste your address as-is.';
+          relayInfoEl.style.display = 'block';
+        } else {
+          relayInfoEl.style.display = 'none';
         }
       }
     } catch (err) {
@@ -1972,39 +2020,47 @@ function initWANPeerModal() {
 async function addWanDirectPeer() {
   const addrRaw = document.getElementById('wan-peer-address')?.value?.trim();
   const label   = document.getElementById('wan-peer-label')?.value?.trim() || '';
-  if (!addrRaw) { showNotification('Enter an ip:port address', 'error'); return;  }
+  if (!addrRaw) { showNotification('Enter an ip:port address', 'error'); return; }
 
-  // Parse ip:port — handle IPv6 [::1]:port too
-  let ip, port;
-  const ipv6Match = addrRaw.match(/^\[(.+)\]:(\d+)$/);
+  // Parse ip:port — handle IPv6 [::1]:port and optional #token suffix
+  let ip, port, token = null;
+  const hashIdx = addrRaw.lastIndexOf('#');
+  const baseAddr = hashIdx !== -1 ? addrRaw.slice(0, hashIdx) : addrRaw;
+  if (hashIdx !== -1) token = addrRaw.slice(hashIdx + 1) || null;
+
+  const ipv6Match = baseAddr.match(/^\[(.+)\]:(\d+)$/);
   if (ipv6Match) { ip = ipv6Match[1]; port = parseInt(ipv6Match[2]); }
   else {
-    const lastColon = addrRaw.lastIndexOf(':');
+    const lastColon = baseAddr.lastIndexOf(':');
     if (lastColon === -1) { showNotification('Format should be ip:port', 'error'); return; }
-    ip = addrRaw.slice(0, lastColon);
-    port = parseInt(addrRaw.slice(lastColon + 1));
+    ip = baseAddr.slice(0, lastColon);
+    port = parseInt(baseAddr.slice(lastColon + 1));
   }
   if (!ip || !port || isNaN(port)) { showNotification('Invalid address format', 'error'); return; }
 
   const id = 'wand-' + Date.now();
   const displayLabel = label || `${ip}:${port}`;
 
-  const result = await window.electronAPI.wanDirectAddPeer(id, ip, port, displayLabel);
+  const result = await window.electronAPI.wanDirectAddPeer(id, ip, port, displayLabel, { token });
   if (!result.success) { showNotification('Failed: ' + result.error, 'error'); return; }
 
-  // Persist so it survives restarts
+  const peerToken     = result.token     || token;
+  const peerRelayIp   = result.relayIp   || null;
+  const peerRelayPort = result.relayPort || null;
+
   const saved = loadWanDirectPeersFromStorage();
-  saved.push({ id, ip, port, label: displayLabel });
+  saved.push({ id, ip, port, label: displayLabel, token: peerToken, relayIp: peerRelayIp, relayPort: peerRelayPort });
   saveWanDirectPeersToStorage(saved);
 
-  // Clear inputs + close modal
   document.getElementById('wan-peer-address').value = '';
   document.getElementById('wan-peer-label').value = '';
   document.getElementById('add-wan-peer-modal').style.display = 'none';
 
-  showNotification(`${displayLabel} added`, 'success');
-  // peer-discovered event will fire from main process, renderPeers auto-updates
+  const relayNote = peerRelayIp ? ' · 🔄 relay available' : '';
+  showNotification(`${displayLabel} added${relayNote}`, 'success');
+  // peer-discovered event fires from main process, renderPeers auto-updates
 }
+
 // ============================================================
 // THEME SYSTEM
 // ============================================================

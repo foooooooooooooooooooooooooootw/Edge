@@ -2846,3 +2846,18 @@ body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 .reaction-pill {
   font-family: 'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',inherit;
 }
+
+/* ── WAN connection method badges ────────────────────────── */
+.wan-conn-badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  border-radius: 5px;
+  margin-left: 0.4rem;
+  vertical-align: middle;
+  letter-spacing: 0.02em;
+}
+.wan-conn-badge.direct { background: rgba(0,238,100,0.15); color: #00ee64; border: 1px solid rgba(0,238,100,0.3); }
+.wan-conn-badge.relay  { background: rgba(250,180,0,0.15);  color: #fab400; border: 1px solid rgba(250,180,0,0.3); }
+.wan-conn-badge.tcp    { background: rgba(100,160,255,0.15); color: #64a0ff; border: 1px solid rgba(100,160,255,0.3); }

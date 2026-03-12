@@ -36,6 +36,7 @@ app.whenReady().then(() => {
   networkManager.on('typing-received',   d => mainWindow.webContents.send('typing-received', d));
   networkManager.on('reaction-received', d => mainWindow.webContents.send('reaction-received', d));
   networkManager.on('read-receipt',      d => mainWindow.webContents.send('read-receipt', d));
+  networkManager.on('wan-connection-method', d => mainWindow.webContents.send('wan-connection-method', d));
 
   networkManager.on('file-incoming', async (data) => {
     // Guard: ignore malformed events with no filename (e.g. stray message-type packets)
@@ -284,19 +285,63 @@ ipcMain.handle('wan-direct-get-my-address', async () => {
       upnp.getExternalIP(),
       upnp.addPortMappingWithFallback(transferPort, 'Edge-Direct'),
     ]);
-    if (publicIp) return { success: true, address: `${publicIp}:${transferPort}`, publicIp, localIp, port: transferPort, method: 'upnp' };
+    if (publicIp) {
+      // Start relay server now that we have a public IP
+      let relayEndpoint = null;
+      try {
+        relayEndpoint = await networkManager.startRelayServer(publicIp, upnp);
+      } catch (e) { /* relay optional */ }
+
+      return {
+        success: true,
+        address: `${publicIp}:${transferPort}`,
+        publicIp, localIp, port: transferPort,
+        method: 'upnp',
+        hasRelay: !!relayEndpoint,
+        relayIp: relayEndpoint?.ip || null,
+        relayPort: relayEndpoint?.port || null,
+      };
+    }
   } catch (e) { /* UPnP unavailable */ }
 
-  // Fallback — return local IP (works on same LAN, but user knows their WAN IP)
-  return { success: true, address: `${localIp}:${transferPort}`, publicIp: null, localIp, port: transferPort, method: 'local' };
+  // Fallback — return local IP
+  return { success: true, address: `${localIp}:${transferPort}`, publicIp: null, localIp, port: transferPort, method: 'local', hasRelay: false };
 });
 
-// Add a WAN direct peer — injects into the same peer map LAN uses
-ipcMain.handle('wan-direct-add-peer', async (_e, { id, ip, port, label }) => {
+// Add a WAN direct peer — injects into the same peer map LAN uses.
+// If we are the relay host, we issue a token for this peer.
+ipcMain.handle('wan-direct-add-peer', async (_e, { id, ip, port, label, token, relayIp, relayPort }) => {
   try {
-    const peer = networkManager.addWanDirectPeer(id, ip, parseInt(port), label);
-    return { success: true, peer };
+    // If we have relay capability, issue a token for this peer
+    let peerToken = token || null;
+    let peerRelayIp = relayIp || null;
+    let peerRelayPort = relayPort || null;
+
+    if (networkManager.isRelayAvailable() && !peerToken) {
+      peerToken = networkManager.issueTokenForPeer(id);
+      const ep = networkManager.getRelayEndpoint();
+      peerRelayIp   = ep?.ip   || null;
+      peerRelayPort = ep?.port || null;
+    }
+
+    const peer = networkManager.addWanDirectPeer(id, ip, parseInt(port), label, {
+      token:     peerToken,
+      relayIp:   peerRelayIp,
+      relayPort: peerRelayPort,
+    });
+    return { success: true, peer, token: peerToken, relayIp: peerRelayIp, relayPort: peerRelayPort };
   } catch (err) { return { success: false, error: err.message }; }
+});
+
+// Get the token we should use when connecting to a relay host.
+// Called by the non-relay side when it needs to include a token in the address it received.
+ipcMain.handle('wan-direct-get-relay-info', async () => {
+  const ep = networkManager.getRelayEndpoint();
+  return {
+    hasRelay:  networkManager.isRelayAvailable(),
+    relayIp:   ep?.ip   || null,
+    relayPort: ep?.port || null,
+  };
 });
 
 // Remove a WAN direct peer

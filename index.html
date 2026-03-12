@@ -399,6 +399,7 @@
             <button id="copy-my-wan-address" class="copy-btn">Copy</button>
           </div>
           <div id="my-wan-address-hint" style="font-size:0.78rem;color:#888;"></div>
+          <div id="relay-status-note" style="font-size:0.78rem;color:#4ade80;margin-top:0.4rem;display:none;"></div>
         </div>
 
         <!-- Connect to peer -->
@@ -408,10 +409,10 @@
             <input type="text" id="wan-peer-label" placeholder="Name (optional)" style="flex:1;background:#1a1a1a;border:1px solid #333;color:#e0e0e0;border-radius:8px;padding:0.55rem 0.8rem;font-size:0.87rem;">
           </div>
           <div class="link-display">
-            <input type="text" id="wan-peer-address" placeholder="ip:port  e.g. 203.0.113.5:45455">
+            <input type="text" id="wan-peer-address" placeholder="ip:port or ip:port#token">
             <button id="wan-peer-add" class="primary-btn">Add</button>
           </div>
-          <div style="font-size:0.78rem;color:#666;margin-top:0.5rem;">Once connected, you can send and receive files just like LAN — drag &amp; drop into the chat.</div>
+          <div style="font-size:0.78rem;color:#666;margin-top:0.5rem;">Paste the address your peer shared with you. If it includes a <code style="color:#aaa;">#token</code> that's normal — it enables relay fallback.</div>
         </div>
 
       </div>

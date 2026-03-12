@@ -7,6 +7,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const { loadOrCreateCert, getCertFingerprint } = require('./cert-gen');
+const { generateToken, generateSessionId, RelayServer, RelayStream, HolePuncher, WanNegotiator, RELAY_PORT_OFFSET, PUNCH_UDP_OFFSET } = require('./holepunch');
 
 const BROADCAST_PORT = 45454;
 const TRANSFER_PORT_START = 45455;
@@ -30,6 +31,15 @@ class NetworkManager extends EventEmitter {
     // TLS — load or generate persistent self-signed cert
     this._tlsCreds = loadOrCreateCert();
     this._encryptLAN = this.config.encryptLAN !== false; // default ON
+    // Relay server (started if UPnP succeeds)
+    this._relayServer = null;
+    this._relayPort   = null;
+    this._relayPublicIp = null;
+    // Issued tokens: peerId → token (persisted in config)
+    this._issuedTokens = new Map(Object.entries(this.config.issuedTokens || {}));
+    // WAN session cache: peerId → { method:'direct'|'relay'|'tcp', stream? }
+    // Avoids re-negotiating on every message to the same WAN peer.
+    this._wanSessions = new Map();
   }
 
   getEncryptLAN() { return this._encryptLAN; }
@@ -231,7 +241,17 @@ class NetworkManager extends EventEmitter {
   }
 
   startTransferServer() {
-    const onSocket = (socket) => this.handleIncomingTransfer(socket);
+    const onSocket = (socket) => {
+      // Check if this is a WAN-direct peer — if so, run punch negotiation first
+      const remoteIp = socket.remoteAddress?.replace(/^::ffff:/, '');
+      const wanPeer  = Array.from(this.peers.values()).find(
+        p => p.isWanDirect && p.ip === remoteIp
+      );
+      if (wanPeer) {
+        this._handleWanNegotiation(socket, wanPeer).catch(() => {});
+      }
+      this.handleIncomingTransfer(socket);
+    };
 
     if (this._encryptLAN) {
       this.transferServer = tls.createServer({
@@ -490,10 +510,21 @@ class NetworkManager extends EventEmitter {
     this.pendingThumbnails.set(filePath, thumbnail);
   }
 
-  // ── TLS-aware socket factory ───────────────────────────────
-  // Returns a socket (plain or TLS) connected to the peer.
-  // Resolves once connected, rejects on error/timeout.
-  _connectToPeer(peer, timeoutMs = 5000) {
+  // ── Socket factory ────────────────────────────────────────────
+  // For LAN peers: plain TCP or TLS depending on config.
+  // For WAN-direct peers: first-call negotiates hole-punch, caches result.
+  //   Subsequent calls reuse the cached method or open fresh TCP.
+  async _connectToPeer(peer, timeoutMs = 5000) {
+    // ── WAN-direct path ──────────────────────────────────────
+    if (peer.isWanDirect) {
+      return this._connectWanPeer(peer, timeoutMs);
+    }
+    // ── LAN path ─────────────────────────────────────────────
+    return this._connectTCP(peer, timeoutMs);
+  }
+
+  // Raw TCP/TLS connect (LAN and WAN TCP fallback)
+  _connectTCP(peer, timeoutMs = 5000) {
     return new Promise((resolve, reject) => {
       const useTLS = this._encryptLAN && peer.encrypted;
       let socket;
@@ -502,17 +533,15 @@ class NetworkManager extends EventEmitter {
         socket = tls.connect({
           host: peer.ip,
           port: peer.port,
-          rejectUnauthorized: false,  // TOFU — we don't use a CA
-          // If peer announced a fingerprint, verify it after connect
+          rejectUnauthorized: false,
           checkServerIdentity: () => undefined,
         });
         socket.once('secureConnect', () => {
-          // Optional TOFU fingerprint check
           if (peer.tlsFingerprint) {
             const actualFp = socket.getPeerCertificate()?.fingerprint256;
             if (actualFp && actualFp !== peer.tlsFingerprint) {
               socket.destroy();
-              reject(new Error(`TLS fingerprint mismatch for ${peer.username}! Expected ${peer.tlsFingerprint} got ${actualFp}`));
+              reject(new Error(`TLS fingerprint mismatch for ${peer.username}`));
               return;
             }
           }
@@ -527,6 +556,134 @@ class NetworkManager extends EventEmitter {
       socket.setTimeout(timeoutMs, () => { socket.destroy(); reject(new Error('Connection timeout')); });
     });
   }
+
+  // WAN-direct connect: negotiate punch on first call, cache result
+  async _connectWanPeer(peer, timeoutMs = 8000) {
+    const cached = this._wanSessions.get(peer.id);
+
+    // ── Cached relay stream: reuse (relay is stateful per UDP session) ──
+    if (cached?.method === 'relay' && cached.stream && !cached.stream.destroyed) {
+      return cached.stream;
+    }
+
+    // ── Step 1: Try direct TCP with a short timeout ──────────────
+    // This is the fast path — if UPnP is working on both sides or the
+    // peer is directly reachable, we connect immediately and skip all
+    // the punch/relay machinery entirely.
+    const TCP_PROBE_MS = 2500;
+    const tcpSocket = await this._connectTCP(peer, TCP_PROBE_MS).catch(() => null);
+
+    if (tcpSocket) {
+      // TCP works — if we already cached this method, just return the socket
+      if (cached?.method === 'tcp') return tcpSocket;
+
+      // First successful TCP connection: record it and notify renderer
+      // Don't run negotiation — TCP is already the best option here.
+      this._wanSessions.set(peer.id, { method: 'tcp' });
+      this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
+      return tcpSocket;
+    }
+
+    // ── Step 2: TCP failed — try UDP hole-punch ──────────────────
+    // Only attempt this if we haven't already cached a failed result.
+    if (cached?.method === 'unreachable') {
+      throw new Error(`${peer.username} is unreachable`);
+    }
+
+    console.log(`[wan] TCP to ${peer.ip}:${peer.port} failed, attempting hole-punch…`);
+
+    // We need a TCP connection to negotiate the punch — try with the full timeout
+    // on a second attempt in case the first probe was just too tight.
+    const tcpForNegotiation = await this._connectTCP(peer, timeoutMs).catch(() => null);
+
+    if (!tcpForNegotiation) {
+      // Still no TCP — can't negotiate, try relay directly if we have it
+      if (peer.token && peer.relayIp && peer.relayPort) {
+        console.log(`[wan] No TCP, trying cold relay connect…`);
+        const sessionId = require('./holepunch').generateSessionId();
+        const rs = new RelayStream({
+          relayIp:   peer.relayIp,
+          relayPort: peer.relayPort,
+          token:     peer.token,
+          sessionId,
+          localPort: this.transferPort + PUNCH_UDP_OFFSET + 10,
+        });
+        try {
+          await rs.connect();
+          this._wanSessions.set(peer.id, { method: 'relay', stream: rs });
+          this.emit('wan-connection-method', { peerId: peer.id, method: 'relay' });
+          return rs;
+        } catch (e) {
+          console.warn('[wan] Cold relay failed:', e.message);
+        }
+      }
+      this._wanSessions.set(peer.id, { method: 'unreachable' });
+      throw new Error(`Cannot reach ${peer.username} — TCP failed and no relay available`);
+    }
+
+    // ── Step 3: Negotiate over TCP — attempt punch, fall back to relay ──
+    const localUdpPort = this.transferPort + PUNCH_UDP_OFFSET;
+
+    const negotiator = new WanNegotiator(tcpForNegotiation, {
+      isInitiator: true,
+      localUdpPort,
+      token:     peer.token    || null,
+      relayIp:   peer.relayIp  || null,
+      relayPort: peer.relayPort || null,
+    });
+
+    let result;
+    try {
+      result = await negotiator.negotiate();
+    } catch (e) {
+      console.warn('[punch] negotiate() threw:', e.message);
+      result = { method: 'tcp' };
+    }
+
+    this._wanSessions.set(peer.id, result);
+    this.emit('wan-connection-method', { peerId: peer.id, method: result.method });
+
+    if (result.method === 'relay') return result.stream;
+
+    // direct or tcp — TCP socket from negotiation is already connected
+    return tcpForNegotiation;
+  }
+
+  // Called from startTransferServer when an incoming TCP connection arrives
+  // from a WAN-direct peer — we respond to their punch-offer if present.
+  // If the initiator connected via plain TCP (UPnP working on both sides),
+  // they won't send a punch-offer line, readLine times out, and we proceed
+  // with normal handleIncomingTransfer unaffected.
+  async _handleWanNegotiation(socket, wanPeer) {
+    const relayEp      = this.getRelayEndpoint();
+    const localUdpPort = this.transferPort + PUNCH_UDP_OFFSET;
+
+    const negotiator = new WanNegotiator(socket, {
+      isInitiator:     false,
+      localUdpPort,
+      relayIp:         relayEp?.ip   || null,
+      relayPort:       relayEp?.port || null,
+      registerSession: this.isRelayAvailable()
+        ? (sid) => this.registerRelaySession(sid)
+        : null,
+    });
+
+    try {
+      const result = await negotiator.negotiate();
+      if (result.method !== 'tcp') {
+        // Only log/emit non-trivial results (TCP is the silent happy path)
+        console.log(`[punch] Responder negotiated: ${result.method}`);
+        if (wanPeer) {
+          this._wanSessions.set(wanPeer.id, result);
+          this.emit('wan-connection-method', { peerId: wanPeer.id, method: result.method });
+        }
+      }
+    } catch (e) {
+      // Non-fatal — older client or plain TCP initiator
+    }
+  }
+
+
 
   async sendTyping(peerId, isTyping) {
     const peer = this.peers.get(peerId);
@@ -640,10 +797,88 @@ class NetworkManager extends EventEmitter {
     return this.transferPort;
   }
 
+  // ── Relay server (UPnP-capable side only) ───────────────────
+  // Call this after UPnP succeeds.  Opens a UDP relay socket and
+  // registers the mapped port.  Returns the relay endpoint string.
+  async startRelayServer(publicIp, upnpClient) {
+    if (this._relayServer) return this.getRelayEndpoint();
+    const relayPort = this.transferPort + RELAY_PORT_OFFSET;
+    const srv = new RelayServer();
+    try {
+      await srv.listen(relayPort);
+    } catch (e) {
+      // Port in use — try next one
+      await srv.listen(relayPort + 1);
+    }
+    // Restore any persisted tokens
+    for (const token of this._issuedTokens.values()) srv.addToken(token);
+    this._relayServer   = srv;
+    this._relayPort     = srv.port;
+    this._relayPublicIp = publicIp;
+    // Map relay port via UPnP
+    try { await upnpClient.addPortMappingWithFallback(this._relayPort, 'Edge-Relay'); } catch {}
+    this.emit('relay-started', { ip: publicIp, port: this._relayPort });
+    return this.getRelayEndpoint();
+  }
+
+  getRelayEndpoint() {
+    if (!this._relayServer) return null;
+    return { ip: this._relayPublicIp, port: this._relayPort };
+  }
+
+  isRelayAvailable() { return !!this._relayServer; }
+
+  // Issue a token for a specific peer (call when adding a WAN-direct peer)
+  issueTokenForPeer(peerId) {
+    if (this._issuedTokens.has(peerId)) return this._issuedTokens.get(peerId);
+    const token = generateToken();
+    this._issuedTokens.set(peerId, token);
+    if (this._relayServer) this._relayServer.addToken(token);
+    // Persist
+    this.config.issuedTokens = Object.fromEntries(this._issuedTokens);
+    this.saveConfig();
+    return token;
+  }
+
+  revokeTokenForPeer(peerId) {
+    const token = this._issuedTokens.get(peerId);
+    if (token) {
+      this._issuedTokens.delete(peerId);
+      if (this._relayServer) this._relayServer.removeToken(token);
+      this.config.issuedTokens = Object.fromEntries(this._issuedTokens);
+      this.saveConfig();
+    }
+  }
+
+  getTokenForPeer(peerId) { return this._issuedTokens.get(peerId) || null; }
+
+  // Register a relay session for two peers about to connect
+  registerRelaySession(sessionId) {
+    if (this._relayServer) this._relayServer.registerSession(sessionId);
+  }
+
+  // ── Hole-punch attempt ────────────────────────────────────────
+  // Called by main process after TCP connection is established.
+  // Negotiates over the already-open TCP socket, then tries UDP punch.
+  // Returns { method: 'direct'|'relay'|'none', ... }
+  async attemptHolePunch({ tcpSocket, isRelayHost, remoteIp, remoteUdpPort, relayIp, relayPort, token, sessionId }) {
+    const localUdpPort = this.transferPort + 1; // punch port = transferPort+1
+    const puncher = new HolePuncher({
+      localPort:  localUdpPort,
+      remoteIp,
+      remotePort: remoteUdpPort,
+      relayIp:    relayIp  || null,
+      relayPort:  relayPort || null,
+      token:      token    || null,
+      sessionId:  sessionId || null,
+    });
+    return await puncher.attempt();
+  }
+
   // ── WAN Direct peers ────────────────────────────────────────
   // Inject a synthetic peer into the same peers Map so all existing
   // sendFile / sendMessage / sendTyping logic works unchanged.
-  addWanDirectPeer(id, ip, port, label) {
+  addWanDirectPeer(id, ip, port, label, { token, relayIp, relayPort } = {}) {
     const peer = {
       id,
       ip,
@@ -652,7 +887,10 @@ class NetworkManager extends EventEmitter {
       avatar: null,
       nickname: null,
       lastSeen: Date.now(),
-      isWanDirect: true,   // flag so renderer can style it differently
+      isWanDirect: true,
+      token:     token    || null,   // auth token for relay
+      relayIp:   relayIp  || null,   // relay host IP (if available)
+      relayPort: relayPort || null,  // relay host UDP port
     };
     this.peers.set(id, peer);
     this.emit('peer-discovered', peer);
@@ -661,6 +899,8 @@ class NetworkManager extends EventEmitter {
 
   removeWanDirectPeer(id) {
     if (this.peers.has(id)) {
+      this.revokeTokenForPeer(id);
+      this._wanSessions.delete(id);
       this.peers.delete(id);
       this.emit('peer-left', id);
     }
