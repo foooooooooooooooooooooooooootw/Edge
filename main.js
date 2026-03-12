@@ -37,6 +37,7 @@ app.whenReady().then(() => {
   networkManager.on('reaction-received', d => mainWindow.webContents.send('reaction-received', d));
   networkManager.on('read-receipt',      d => mainWindow.webContents.send('read-receipt', d));
   networkManager.on('wan-connection-method', d => mainWindow.webContents.send('wan-connection-method', d));
+  networkManager.on('wan-peer-auto-discovered', d => mainWindow.webContents.send('wan-peer-auto-discovered', d));
 
   networkManager.on('file-incoming', async (data) => {
     // Guard: ignore malformed events with no filename (e.g. stray message-type packets)

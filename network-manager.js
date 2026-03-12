@@ -232,6 +232,7 @@ class NetworkManager extends EventEmitter {
     this.peerTimeoutInterval = setInterval(() => {
       const now = Date.now();
       for (const [peerId, peer] of this.peers.entries()) {
+        if (peer.isWanDirect) continue; // WAN-direct peers are manually managed, never timed out
         if (now - peer.lastSeen > PEER_TIMEOUT) {
           this.peers.delete(peerId);
           this.emit('peer-left', peerId);
@@ -242,11 +243,30 @@ class NetworkManager extends EventEmitter {
 
   startTransferServer() {
     const onSocket = (socket) => {
-      // Check if this is a WAN-direct peer — if so, run punch negotiation first
       const remoteIp = socket.remoteAddress?.replace(/^::ffff:/, '');
-      const wanPeer  = Array.from(this.peers.values()).find(
+
+      // Find existing WAN-direct peer by IP
+      let wanPeer = Array.from(this.peers.values()).find(
         p => p.isWanDirect && p.ip === remoteIp
       );
+
+      // ── Reverse discovery ──────────────────────────────────
+      // Unknown IP connecting to our port = someone added us but we haven't
+      // added them back yet (or they're on a different IP than we stored).
+      // Auto-create a peer entry so messages/files route correctly.
+      // Uses a stable ID based on IP so repeated connections don't duplicate.
+      if (!wanPeer && remoteIp) {
+        const stableId = 'wand-auto-' + remoteIp.replace(/[.:]/g, '_');
+        wanPeer = Array.from(this.peers.values()).find(p => p.id === stableId);
+        if (!wanPeer) {
+          wanPeer = this.addWanDirectPeer(
+            stableId, remoteIp, socket.remotePort, remoteIp,
+            { token: null, relayIp: null, relayPort: null }
+          );
+          console.log(`[wan] Auto-discovered incoming peer ${remoteIp}:${socket.remotePort}`);
+        }
+      }
+
       if (wanPeer) {
         this._handleWanNegotiation(socket, wanPeer).catch(() => {});
       }

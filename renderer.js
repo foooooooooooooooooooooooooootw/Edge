@@ -583,7 +583,20 @@ function setupEventListeners() {
 function setupElectronListeners() {
   // Incoming text messages
   window.electronAPI.onMessageReceived((data) => {
-    const fromPeer = peers.find(p => p.ip === data.peerIp);
+    // Strip IPv6-mapped prefix so IP matching works for WAN peers
+    const senderIp = (data.peerIp || '').replace(/^::ffff:/, '');
+    const fromPeer = peers.find(p => p.ip === senderIp);
+
+    // Auto-select if we have no peer selected and this is the only one
+    if (!selectedPeer && fromPeer) {
+      selectedPeer = fromPeer;
+      chatHistory = [];
+      renderedMessageCount = 0;
+      chatMessages.innerHTML = '';
+      renderPeers();
+      updateChatHeader();
+    }
+
     if (fromPeer && fromPeer.id !== selectedPeer?.id) {
       unreadCounts.set(fromPeer.id, (unreadCounts.get(fromPeer.id) || 0) + 1);
       renderPeers();
@@ -591,11 +604,9 @@ function setupElectronListeners() {
     } else {
       const msgItem = { type: 'message', subtype: 'received', message: data.message, reply: data.reply || null, sender: data.sender || 'Unknown', senderAvatar: data.senderAvatar || null, timestamp: new Date() };
       appendMessage(msgItem);
-      // Send read receipt if chat is in focus
       if (fromPeer && document.hasFocus()) {
         window.electronAPI.sendReadReceipt?.(fromPeer.id, msgItem.msgId);
       }
-      // Peer replied — reset the streak
       resetEdgeStreak();
       showNotification(`Message from ${data.sender}`, 'success');
     }
@@ -603,15 +614,14 @@ function setupElectronListeners() {
 
   // Typing indicator
   window.electronAPI.onTypingReceived && window.electronAPI.onTypingReceived((data) => {
-    const peer = peers.find(p => p.ip === data.peerIp);
+    const senderIp = (data.peerIp || '').replace(/^::ffff:/, '');
+    const peer = peers.find(p => p.ip === senderIp);
     if (peer?.id === selectedPeer?.id) {
       showTypingIndicator(data.typing, data.sender);
       clearTimeout(peerTyping.get(peer.id));
       if (data.typing) {
         peerTyping.set(peer.id, setTimeout(() => showTypingIndicator(false, ''), 4000));
       }
-    } else if (peer && data.typing) {
-      // Increment unread for non-selected peers sending typing (just peer state tracking)
     }
   });
 
@@ -758,8 +768,8 @@ function setupElectronListeners() {
 
   // File accepted (user clicked Accept in dialog)
   window.electronAPI.onFileIncomingAccepted((data) => {
-    // Find peer by IP
-    const peer = peers.find(p => p.ip === data.peerIp.replace('::ffff:', ''));
+    const senderIp = (data.peerIp || '').replace(/^::ffff:/, '');
+    const peer = peers.find(p => p.ip === senderIp);
     const peerName = peer ? (peer.nickname || peer.username) : data.sender;
     
     incomingFiles.set(data.transferId, {
@@ -810,6 +820,29 @@ function setupElectronListeners() {
       showNotification('⚡ Direct UDP connection established', 'success');
     } else if (data.method === 'relay') {
       showNotification('🔄 Connected via relay (NAT traversal fallback)', 'success');
+    }
+  });
+
+  // Auto-discovered WAN peer — they connected to us before we added them
+  window.electronAPI.onWanPeerAutoDiscovered?.((data) => {
+    const peer = data.peer;
+    if (!peer) return;
+    if (!peers.find(p => p.id === peer.id)) {
+      peers.push(peer);
+      renderPeers();
+    }
+    // Persist so they survive restart
+    const saved = loadWanDirectPeersFromStorage();
+    if (!saved.find(p => p.id === peer.id)) {
+      saved.push({ id: peer.id, ip: peer.ip, port: peer.port, label: peer.username });
+      saveWanDirectPeersToStorage(saved);
+    }
+    showNotification(`${peer.username} connected to you`, 'success');
+    if (!selectedPeer) {
+      selectedPeer = peer;
+      chatMessages.innerHTML = '';
+      renderPeers();
+      updateChatHeader();
     }
   });
 }

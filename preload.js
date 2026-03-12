@@ -94,6 +94,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onReactionReceived: (cb) => ipcRenderer.on('reaction-received', (e, d) => cb(d)),
   onReadReceipt: (cb) => ipcRenderer.on('read-receipt', (e, d) => cb(d)),
   onWanConnectionMethod: (cb) => ipcRenderer.on('wan-connection-method', (e, d) => cb(d)),
+  onWanPeerAutoDiscovered: (cb) => ipcRenderer.on('wan-peer-auto-discovered', (e, d) => cb(d)),
 
   // Clipboard image paste
   saveClipboardImage: (dataUrl, filename) => ipcRenderer.invoke('save-clipboard-image', { dataUrl, filename }),
