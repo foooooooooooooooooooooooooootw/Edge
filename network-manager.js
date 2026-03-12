@@ -297,7 +297,11 @@ class NetworkManager extends EventEmitter {
       }
 
       if (wanPeer) {
-        this._handleWanNegotiation(socket, wanPeer).catch(() => {});
+        // NOTE: We do NOT run _handleWanNegotiation here speculatively.
+        // It races with handleIncomingTransfer on the same socket data stream
+        // and consumes the message header before the transfer handler sees it.
+        // Punch negotiation is outbound-initiated only — the initiator opens
+        // a separate dedicated TCP connection when they need to negotiate.
       }
       this.handleIncomingTransfer(socket);
     };
@@ -606,7 +610,11 @@ class NetworkManager extends EventEmitter {
     });
   }
 
-  // WAN-direct connect: negotiate punch on first call, cache result
+  // WAN-direct connect: negotiate punch on first call, cache result.
+  // IMPORTANT: negotiation uses a DEDICATED socket that is destroyed after
+  // the handshake. The transfer socket is always opened fresh afterwards.
+  // This prevents _handleWanNegotiation from racing with handleIncomingTransfer
+  // on the receiver side (they would both consume from the same data stream).
   async _connectWanPeer(peer, timeoutMs = 8000) {
     const cached = this._wanSessions.get(peer.id);
 
@@ -615,46 +623,41 @@ class NetworkManager extends EventEmitter {
       return cached.stream;
     }
 
-    // ── Step 1: Try direct TCP with a short timeout ──────────────
-    // This is the fast path — if UPnP is working on both sides or the
-    // peer is directly reachable, we connect immediately and skip all
-    // the punch/relay machinery entirely.
-    const TCP_PROBE_MS = 2500;
-    const tcpSocket = await this._connectTCP(peer, TCP_PROBE_MS).catch(() => null);
-
-    if (tcpSocket) {
-      // TCP works — if we already cached this method, just return the socket
-      if (cached?.method === 'tcp') return tcpSocket;
-
-      // First successful TCP connection: record it and notify renderer
-      // Don't run negotiation — TCP is already the best option here.
-      this._wanSessions.set(peer.id, { method: 'tcp' });
-      this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
-      return tcpSocket;
+    // ── Fast path: method already known ──────────────────────────
+    if (cached?.method === 'tcp' || cached?.method === 'direct') {
+      return this._connectTCP(peer, timeoutMs);
     }
 
-    // ── Step 2: TCP failed — try UDP hole-punch ──────────────────
-    // Only attempt this if we haven't already cached a failed result.
+    // ── Step 1: Probe TCP ─────────────────────────────────────────
+    const TCP_PROBE_MS = 2500;
+    const probeSocket  = await this._connectTCP(peer, TCP_PROBE_MS).catch(() => null);
+
+    if (probeSocket) {
+      probeSocket.destroy(); // probe only — don't reuse for transfer
+      this._wanSessions.set(peer.id, { method: 'tcp' });
+      this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
+      return this._connectTCP(peer, timeoutMs);
+    }
+
+    // ── Step 2: TCP unreachable — negotiate punch on dedicated socket ──
     if (cached?.method === 'unreachable') {
       throw new Error(`${peer.username} is unreachable`);
     }
 
     console.log(`[wan] TCP to ${peer.ip}:${peer.port} failed, attempting hole-punch…`);
 
-    // We need a TCP connection to negotiate the punch — try with the full timeout
-    // on a second attempt in case the first probe was just too tight.
-    const tcpForNegotiation = await this._connectTCP(peer, timeoutMs).catch(() => null);
+    const negotiateSocket = await this._connectTCP(peer, timeoutMs).catch(() => null);
 
-    if (!tcpForNegotiation) {
-      // Still no TCP — can't negotiate, try relay directly if we have it
+    if (!negotiateSocket) {
+      // No TCP at all — try cold relay
       if (peer.token && peer.relayIp && peer.relayPort) {
-        console.log(`[wan] No TCP, trying cold relay connect…`);
-        const sessionId = require('./holepunch').generateSessionId();
+        console.log(`[wan] No TCP, trying cold relay…`);
+        const { generateSessionId } = require('./holepunch');
         const rs = new RelayStream({
           relayIp:   peer.relayIp,
           relayPort: peer.relayPort,
           token:     peer.token,
-          sessionId,
+          sessionId: generateSessionId(),
           localPort: this.transferPort + PUNCH_UDP_OFFSET + 10,
         });
         try {
@@ -670,10 +673,9 @@ class NetworkManager extends EventEmitter {
       throw new Error(`Cannot reach ${peer.username} — TCP failed and no relay available`);
     }
 
-    // ── Step 3: Negotiate over TCP — attempt punch, fall back to relay ──
+    // ── Step 3: Negotiate on dedicated socket, then open fresh transfer socket ──
     const localUdpPort = this.transferPort + PUNCH_UDP_OFFSET;
-
-    const negotiator = new WanNegotiator(tcpForNegotiation, {
+    const negotiator   = new WanNegotiator(negotiateSocket, {
       isInitiator: true,
       localUdpPort,
       token:     peer.token    || null,
@@ -687,6 +689,8 @@ class NetworkManager extends EventEmitter {
     } catch (e) {
       console.warn('[punch] negotiate() threw:', e.message);
       result = { method: 'tcp' };
+    } finally {
+      negotiateSocket.destroy(); // always discard — never send transfer data on this socket
     }
 
     this._wanSessions.set(peer.id, result);
@@ -694,8 +698,8 @@ class NetworkManager extends EventEmitter {
 
     if (result.method === 'relay') return result.stream;
 
-    // direct or tcp — TCP socket from negotiation is already connected
-    return tcpForNegotiation;
+    // TCP/direct — open a clean socket for the actual transfer
+    return this._connectTCP(peer, timeoutMs);
   }
 
   // Called from startTransferServer when an incoming TCP connection arrives
