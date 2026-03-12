@@ -848,9 +848,46 @@ function setupElectronListeners() {
 }
 
 async function loadPeers() {
-  peers = await window.electronAPI.getPeers();
+  const fresh = await window.electronAPI.getPeers();
+
+  // Diff against current array — emit synthetic discovered/left events
+  // rather than replacing the array wholesale (which kills selectedPeer refs)
+  const freshIds   = new Set(fresh.map(p => p.id));
+  const currentIds = new Set(peers.map(p => p.id));
+
+  // Newly appeared peers
+  for (const p of fresh) {
+    if (!currentIds.has(p.id)) {
+      peers.push(p);
+    } else {
+      // Update in-place so object reference stays the same
+      const idx = peers.findIndex(x => x.id === p.id);
+      if (idx !== -1) Object.assign(peers[idx], p);
+    }
+  }
+
+  // Disappeared LAN peers (WAN-direct are never removed by polling)
+  for (let i = peers.length - 1; i >= 0; i--) {
+    const p = peers[i];
+    if (p.isWanDirect) continue; // never evict WAN-direct via poll
+    if (!freshIds.has(p.id)) {
+      peers.splice(i, 1);
+      if (selectedPeer?.id === p.id) {
+        selectedPeer = null;
+        updateChatHeader();
+      }
+    }
+  }
+
+  // Keep selectedPeer pointing at the live object in the array
+  if (selectedPeer) {
+    const live = peers.find(p => p.id === selectedPeer.id);
+    if (live) selectedPeer = live;
+  }
+
   renderPeers();
-  // Auto-select first peer on startup if none selected
+
+  // Auto-select first peer if nothing selected
   if (!selectedPeer && peers.length > 0) {
     selectedPeer = peers[0];
     chatMessages.innerHTML = '<p id="chat-empty-msg" style="color:#666;text-align:center;padding:2rem;">No messages yet. Say hello!</p>';
@@ -2009,13 +2046,30 @@ function initWANPeerModal() {
       if (hintEl) {
         if (res.method === 'upnp') {
           const relayNote = res.hasRelay
-            ? ` · 🔄 Relay server active on port ${res.relayPort}`
+            ? ` · 🔄 Relay active on port ${res.relayPort}`
             : '';
-          hintEl.textContent = `✓ Port opened via UPnP — share this with your peer${relayNote}`;
+          hintEl.innerHTML = `✓ Port opened via UPnP — share this with your peer${relayNote}`;
           hintEl.style.color = '#4ade80';
         } else {
-          hintEl.textContent = `⚠ UPnP unavailable — this is your local IP. Your peer needs to be on the same network, or use your router's public IP with port ${res.port} forwarded manually.`;
+          hintEl.innerHTML = `⚠ UPnP unavailable — showing local IP. <a href="#" id="upnp-diagnose-link" style="color:#fb923c;text-decoration:underline">Why?</a><br>
+            <span style="font-size:0.85em">Your peer needs to be on the same network, or use your router's public IP with port ${res.port} forwarded manually.</span>`;
           hintEl.style.color = '#fb923c';
+
+          document.getElementById('upnp-diagnose-link')?.addEventListener('click', async (e) => {
+            e.preventDefault();
+            hintEl.innerHTML += '<br><em style="color:#aaa">Running diagnostics…</em>';
+            try {
+              const diag = await window.electronAPI.upnpDiagnose?.();
+              if (diag) {
+                const lines = diag.steps.map(s =>
+                  `<span style="color:${s.ok === false ? '#f87171' : s.ok ? '#4ade80' : '#aaa'}">${s.step}</span>`
+                ).join('<br>');
+                hintEl.innerHTML = `⚠ UPnP unavailable<br><small>${lines}</small>`;
+              }
+            } catch (err) {
+              hintEl.innerHTML += `<br><span style="color:#f87171">Diagnostics error: ${err.message}</span>`;
+            }
+          });
         }
       }
       // If we have a relay, show a note about what token will be issued when they add the peer

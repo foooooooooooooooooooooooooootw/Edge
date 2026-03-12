@@ -275,23 +275,32 @@ ipcMain.handle('upnp-receive-init', async (_e, { code }) => {
 // Get your own shareable address (UPnP maps the transfer port so WAN peers can connect)
 ipcMain.handle('wan-direct-get-my-address', async () => {
   const { UPnPClient, getLocalIp } = require('./upnp-client');
-  const localIp = getLocalIp();
+  const localIp    = getLocalIp();
   const transferPort = networkManager.getTransferPort();
 
   // Try UPnP to get public IP + open port
   try {
     const upnp = new UPnPClient();
     await upnp.init();
+
+    // Map TCP (transfers) and UDP (relay) simultaneously
     const [publicIp] = await Promise.all([
       upnp.getExternalIP(),
-      upnp.addPortMappingWithFallback(transferPort, 'Edge-Direct'),
+      upnp.addPortMappingWithFallback(transferPort, 'Edge-TCP', 'TCP'),
+      upnp.addPortMappingWithFallback(transferPort + 2, 'Edge-Relay', 'UDP').catch(e => {
+        console.warn('[UPnP] UDP relay mapping failed (non-fatal):', e.message);
+      }),
     ]);
+
     if (publicIp) {
-      // Start relay server now that we have a public IP
       let relayEndpoint = null;
       try {
         relayEndpoint = await networkManager.startRelayServer(publicIp, upnp);
-      } catch (e) { /* relay optional */ }
+      } catch (e) {
+        console.warn('[UPnP] Relay server failed to start:', e.message);
+      }
+
+      console.log(`[UPnP] Public address: ${publicIp}:${transferPort}, relay: ${relayEndpoint ? JSON.stringify(relayEndpoint) : 'none'}`);
 
       return {
         success: true,
@@ -299,13 +308,16 @@ ipcMain.handle('wan-direct-get-my-address', async () => {
         publicIp, localIp, port: transferPort,
         method: 'upnp',
         hasRelay: !!relayEndpoint,
-        relayIp: relayEndpoint?.ip || null,
+        relayIp:   relayEndpoint?.ip   || null,
         relayPort: relayEndpoint?.port || null,
       };
     }
-  } catch (e) { /* UPnP unavailable */ }
+  } catch (e) {
+    console.warn('[UPnP] Failed — falling back to local IP:', e.message);
+  }
 
-  // Fallback — return local IP
+  // Fallback — return local IP with a clear reason
+  console.log(`[UPnP] Showing local IP ${localIp}:${transferPort} to user`);
   return { success: true, address: `${localIp}:${transferPort}`, publicIp: null, localIp, port: transferPort, method: 'local', hasRelay: false };
 });
 
@@ -343,6 +355,26 @@ ipcMain.handle('wan-direct-get-relay-info', async () => {
     relayIp:   ep?.ip   || null,
     relayPort: ep?.port || null,
   };
+});
+
+// UPnP diagnostics — returns detailed info for showing in the UI
+ipcMain.handle('upnp-diagnose', async () => {
+  const { UPnPClient, getLocalIp } = require('./upnp-client');
+  const steps = [];
+  try {
+    const { discoverGateways } = require('./upnp-client');
+    // We'll run it inline via the class init + expose internals via logging
+    const upnp = new UPnPClient();
+    steps.push({ step: 'Starting SSDP discovery…', ok: null });
+    await upnp.init(5000);
+    steps.push({ step: 'Gateway found and WANIPConnection service located', ok: true });
+    const ip = await upnp.getExternalIP();
+    steps.push({ step: `External IP: ${ip}`, ok: true });
+    return { success: true, steps, publicIp: ip, localIp: getLocalIp() };
+  } catch (e) {
+    steps.push({ step: `Failed: ${e.message}`, ok: false });
+    return { success: false, steps, error: e.message, localIp: getLocalIp() };
+  }
 });
 
 // Remove a WAN direct peer

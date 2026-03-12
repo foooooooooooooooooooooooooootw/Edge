@@ -160,9 +160,29 @@ class NetworkManager extends EventEmitter {
     return this.favorites[peerId] || null;
   }
 
+  // Get all broadcast addresses for this machine's network interfaces.
+  // Returns the limited broadcast (255.255.255.255) plus a subnet-directed
+  // broadcast for each active IPv4 interface (e.g. 192.168.1.255).
+  // Subnet-directed broadcasts are forwarded by some WiFi extenders and
+  // managed switches where limited broadcast is blocked.
+  _getBroadcastAddresses() {
+    const addresses = new Set(['255.255.255.255']);
+    for (const ifaces of Object.values(os.networkInterfaces())) {
+      for (const iface of ifaces) {
+        if (iface.family !== 'IPv4' || iface.internal) continue;
+        // Calculate subnet broadcast: (ip | ~mask)
+        const ipParts   = iface.address.split('.').map(Number);
+        const maskParts = iface.netmask.split('.').map(Number);
+        const bcast = ipParts.map((b, i) => (b | (~maskParts[i] & 0xff))).join('.');
+        if (bcast !== '255.255.255.255') addresses.add(bcast);
+      }
+    }
+    return [...addresses];
+  }
+
   startBroadcast() {
-    this.broadcastSocket = dgram.createSocket('udp4');
-    
+    this.broadcastSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+
     this.broadcastSocket.on('error', (err) => {
       console.error('Broadcast socket error:', err);
     });
@@ -170,62 +190,71 @@ class NetworkManager extends EventEmitter {
     this.broadcastSocket.on('message', (msg, rinfo) => {
       try {
         const data = JSON.parse(msg.toString());
-        
-        // Ignore our own broadcasts
-        if (data.peerId === this.peerId) {
-          return;
-        }
+        if (data.peerId === this.peerId) return;
 
-        // Update or add peer
         const peer = {
-          id: data.peerId,
-          username: data.username,
-          ip: rinfo.address,
-          port: data.transferPort,
-          avatar: data.avatar || null,
-          nickname: this.getFavoriteNickname(data.peerId),
-          lastSeen: Date.now(),
+          id:             data.peerId,
+          username:       data.username,
+          ip:             rinfo.address,
+          port:           data.transferPort,
+          avatar:         data.avatar || null,
+          nickname:       this.getFavoriteNickname(data.peerId),
+          lastSeen:       Date.now(),
           tlsFingerprint: data.tlsFingerprint || null,
-          encrypted: !!data.encrypted,
+          encrypted:      !!data.encrypted,
         };
 
         const isNewPeer = !this.peers.has(peer.id);
         this.peers.set(peer.id, peer);
-
-        if (isNewPeer) {
-          this.emit('peer-discovered', peer);
-        }
-      } catch (err) {
-        // Ignore malformed messages
-      }
+        if (isNewPeer) this.emit('peer-discovered', peer);
+      } catch {}
     });
 
     this.broadcastSocket.bind(BROADCAST_PORT, () => {
       this.broadcastSocket.setBroadcast(true);
-      console.log(`Listening for broadcasts on port ${BROADCAST_PORT}`);
-      
-      // Start broadcasting our presence
-      this.broadcastInterval = setInterval(() => {
-        this.sendBroadcast();
-      }, BROADCAST_INTERVAL);
-      
-      // Send initial broadcast
+
+      // Also join the mDNS multicast group — this works across some bridged
+      // subnets (WiFi extenders in bridge mode, powerline adapters) where
+      // layer-3 broadcast is blocked but multicast at layer 2 passes through.
+      try {
+        this.broadcastSocket.addMembership('224.0.0.251');
+        console.log('[broadcast] Joined mDNS multicast group 224.0.0.251');
+      } catch (e) {
+        console.warn('[broadcast] Could not join mDNS multicast (non-fatal):', e.message);
+      }
+
+      console.log(`[broadcast] Listening on port ${BROADCAST_PORT}`);
+      this.broadcastInterval = setInterval(() => this.sendBroadcast(), BROADCAST_INTERVAL);
       this.sendBroadcast();
     });
   }
 
   sendBroadcast() {
     const message = JSON.stringify({
-      peerId: this.peerId,
-      username: this.username,
-      transferPort: this.transferPort,
-      avatar: this.avatar,
+      peerId:        this.peerId,
+      username:      this.username,
+      transferPort:  this.transferPort,
+      avatar:        this.avatar,
       tlsFingerprint: this._encryptLAN ? this._tlsCreds.fingerprint : null,
-      encrypted: this._encryptLAN,
+      encrypted:     this._encryptLAN,
     });
 
-    const buffer = Buffer.from(message);
-    this.broadcastSocket.send(buffer, 0, buffer.length, BROADCAST_PORT, '255.255.255.255');
+    const buffer    = Buffer.from(message);
+    const targets   = this._getBroadcastAddresses();
+
+    for (const addr of targets) {
+      this.broadcastSocket.send(buffer, 0, buffer.length, BROADCAST_PORT, addr, (err) => {
+        if (err) console.warn(`[broadcast] send to ${addr} failed:`, err.message);
+      });
+    }
+
+    // Also send to mDNS multicast for cross-subnet extender coverage
+    this.broadcastSocket.send(buffer, 0, buffer.length, BROADCAST_PORT, '224.0.0.251', (err) => {
+      if (err && err.code !== 'ENETUNREACH') {
+        // ENETUNREACH is normal if multicast routing isn't available — suppress it
+        console.warn('[broadcast] mDNS multicast send failed:', err.message);
+      }
+    });
   }
 
   startPeerTimeout() {
