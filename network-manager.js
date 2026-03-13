@@ -160,23 +160,41 @@ class NetworkManager extends EventEmitter {
     return this.favorites[peerId] || null;
   }
 
-  // Get all broadcast addresses for this machine's network interfaces.
-  // Returns the limited broadcast (255.255.255.255) plus a subnet-directed
-  // broadcast for each active IPv4 interface (e.g. 192.168.1.255).
-  // Subnet-directed broadcasts are forwarded by some WiFi extenders and
-  // managed switches where limited broadcast is blocked.
+  // Get broadcast addresses for real (non-virtual) network interfaces only.
   _getBroadcastAddresses() {
+    const { getLocalIp } = require('./upnp-client'); // reuse scoring logic
+    // We import the patterns directly to filter here too
+    const VIRTUAL_NAME_PATTERNS = [
+      'vbox', 'virtualbox', 'vmware', 'vmnet', 'vethernet',
+      'hyper-v', 'hyperv', 'wsl', 'docker', 'virbr', 'virtual',
+      'tap', 'tun', 'hamachi', 'nordvpn', 'expressvpn', 'mullvad',
+    ];
+    const VIRTUAL_IP_PREFIXES = [
+      '192.168.56.', '192.168.99.', '192.168.122.', '10.0.2.',
+      '172.17.', '172.18.', '172.19.', '172.20.', '172.21.', '172.22.',
+      '172.23.', '172.24.', '172.25.', '172.26.', '172.27.',
+      '172.28.', '172.29.', '172.30.', '172.31.',
+      '169.254.',
+    ];
+
     const addresses = new Set(['255.255.255.255']);
-    for (const ifaces of Object.values(os.networkInterfaces())) {
+
+    for (const [name, ifaces] of Object.entries(os.networkInterfaces())) {
+      const nameLower = name.toLowerCase();
+      if (VIRTUAL_NAME_PATTERNS.some(p => nameLower.includes(p))) continue;
+
       for (const iface of ifaces) {
         if (iface.family !== 'IPv4' || iface.internal) continue;
-        // Calculate subnet broadcast: (ip | ~mask)
+        if (VIRTUAL_IP_PREFIXES.some(p => iface.address.startsWith(p))) continue;
+
+        // Calculate subnet-directed broadcast
         const ipParts   = iface.address.split('.').map(Number);
         const maskParts = iface.netmask.split('.').map(Number);
         const bcast = ipParts.map((b, i) => (b | (~maskParts[i] & 0xff))).join('.');
         if (bcast !== '255.255.255.255') addresses.add(bcast);
       }
     }
+
     return [...addresses];
   }
 

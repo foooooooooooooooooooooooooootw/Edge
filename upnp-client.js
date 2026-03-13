@@ -30,13 +30,55 @@ function makeSsdpSearch(deviceType) {
   );
 }
 
+// Virtual/hypervisor interface name fragments to deprioritize.
+// We never exclude them entirely — if it's the only interface, better than nothing.
+const VIRTUAL_NAME_PATTERNS = [
+  'vbox', 'virtualbox', 'vmware', 'vmnet', 'vethernet',
+  'hyper-v', 'hyperv', 'wsl', 'docker', 'virbr', 'virtual',
+  'tap', 'tun', 'hamachi', 'nordvpn', 'expressvpn', 'mullvad',
+];
+
+// IP prefixes that are almost certainly virtual/container networks
+const VIRTUAL_IP_PREFIXES = [
+  '192.168.56.',  // VirtualBox host-only
+  '192.168.99.',  // Docker Toolbox
+  '192.168.122.', // libvirt/KVM
+  '10.0.2.',      // VirtualBox NAT
+  '172.17.',      // Docker bridge
+  '172.18.', '172.19.', '172.20.', '172.21.', '172.22.',
+  '172.23.', '172.24.', '172.25.', '172.26.', '172.27.',
+  '172.28.', '172.29.', '172.30.', '172.31.',
+  '169.254.',     // APIPA — DHCP failed, useless for routing
+];
+
+function scoreInterface(name, address) {
+  const nameLower = (name || '').toLowerCase();
+  const isVirtualName = VIRTUAL_NAME_PATTERNS.some(p => nameLower.includes(p));
+  const isVirtualIp   = VIRTUAL_IP_PREFIXES.some(p => address.startsWith(p));
+
+  if (isVirtualName || isVirtualIp) return 0;   // deprioritize strongly
+  if (address.startsWith('10.'))      return 2;  // private, likely real LAN
+  if (address.startsWith('192.168.')) return 3;  // most common home network
+  if (address.startsWith('172.'))     return 1;  // could be real, could be container
+  return 1;                                       // public IP or unknown — low but valid
+}
+
 function getLocalIp() {
-  for (const ifaces of Object.values(os.networkInterfaces())) {
+  let best = null;
+  let bestScore = -1;
+
+  for (const [name, ifaces] of Object.entries(os.networkInterfaces())) {
     for (const i of ifaces) {
-      if (i.family === 'IPv4' && !i.internal) return i.address;
+      if (i.family !== 'IPv4' || i.internal) continue;
+      const score = scoreInterface(name, i.address);
+      if (score > bestScore) {
+        bestScore = score;
+        best = i.address;
+      }
     }
   }
-  return '127.0.0.1';
+
+  return best || '127.0.0.1';
 }
 
 // Collect all SSDP responses for `collectMs`, then resolve with the list.
@@ -69,6 +111,7 @@ function discoverGateways(collectMs = 3500) {
     });
 
     sock.bind(0, localIp, () => {
+      console.log(`[UPnP] SSDP using local IP: ${localIp}`);
       // Send M-SEARCH for both IGD:1 and IGD:2
       for (const st of ['InternetGatewayDevice:1', 'InternetGatewayDevice:2']) {
         const buf = Buffer.from(makeSsdpSearch(st));

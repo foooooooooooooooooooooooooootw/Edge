@@ -2051,7 +2051,12 @@ function initWANPeerModal() {
           hintEl.innerHTML = `✓ Port opened via UPnP — share this with your peer${relayNote}`;
           hintEl.style.color = '#4ade80';
         } else {
-          hintEl.innerHTML = `⚠ UPnP unavailable — showing local IP. <a href="#" id="upnp-diagnose-link" style="color:#fb923c;text-decoration:underline">Why?</a><br>
+          const shownIp = res.address || res.localIp || '?';
+          const looksVirtual = shownIp.startsWith('192.168.56.') || shownIp.startsWith('192.168.99.') || shownIp.startsWith('172.1');
+          const virtualWarning = looksVirtual
+            ? `<br><span style="color:#f87171">⚠ ${shownIp} looks like a virtual adapter (VirtualBox/VMware/Docker). Edge may be using the wrong network interface.</span>`
+            : '';
+          hintEl.innerHTML = `⚠ UPnP unavailable — showing local IP <strong>${shownIp}</strong>. <a href="#" id="upnp-diagnose-link" style="color:#fb923c;text-decoration:underline">Why?</a>${virtualWarning}<br>
             <span style="font-size:0.85em">Your peer needs to be on the same network, or use your router's public IP with port ${res.port} forwarded manually.</span>`;
           hintEl.style.color = '#fb923c';
 
