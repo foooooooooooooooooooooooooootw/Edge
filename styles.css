@@ -41,12 +41,17 @@ header {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .header-left {
   display: flex;
   align-items: center;
   gap: 2rem;
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
 }
 
 h1 {
@@ -68,13 +73,16 @@ h1 svg {
   background: var(--bg);
   padding: 0.25rem;
   border-radius: 8px;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .mode-tab {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.5rem 1rem;
+  padding: 0.5rem 0.75rem;
   background: transparent;
   border: none;
   border-radius: 6px;
@@ -83,6 +91,7 @@ h1 svg {
   font-size: 0.9rem;
   font-weight: 500;
   transition: all 0.2s;
+  white-space: nowrap;
 }
 
 .mode-tab:hover {
@@ -102,7 +111,9 @@ h1 svg {
 .user-profile {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.75rem;
+  flex-shrink: 0;
+  min-width: 0;
 }
 
 .avatar-upload {
@@ -139,6 +150,8 @@ h1 svg {
   gap: 0.5rem;
   align-items: center;
   flex: 1;
+  min-width: 0;
+  max-width: 160px;
 }
 
 .username-display {
@@ -743,9 +756,8 @@ main {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .peer-name::before {
@@ -981,6 +993,8 @@ main {
   display: flex;
   gap: 0.75rem;
   animation: slideIn 0.3s ease-out;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .chat-message.sent {
@@ -1019,7 +1033,8 @@ main {
   flex-direction: column;
   gap: 0.5rem;
   max-width: 70%;
-  overflow: visible;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .chat-message.sent .message-content {
@@ -1031,11 +1046,17 @@ main {
   gap: 0.5rem;
   align-items: center;
   font-size: 0.85rem;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .message-sender {
   font-weight: 500;
   color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .message-time {
@@ -2861,3 +2882,49 @@ body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 .wan-conn-badge.direct { background: rgba(0,238,100,0.15); color: #00ee64; border: 1px solid rgba(0,238,100,0.3); }
 .wan-conn-badge.relay  { background: rgba(250,180,0,0.15);  color: #fab400; border: 1px solid rgba(250,180,0,0.3); }
 .wan-conn-badge.tcp    { background: rgba(100,160,255,0.15); color: #64a0ff; border: 1px solid rgba(100,160,255,0.3); }
+
+/* ── Overflow fixes ──────────────────────────────────────── */
+/* peer-name is display:flex for the dot — text-overflow must be on the child span */
+.peer-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+/* chat header peer info — truncate long names */
+.chat-peer-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.chat-peer-info h3 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-peer-info p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Input area consolidation fixes ─────────────────────── */
+#message-input {
+  min-width: 0;     /* allow flex shrink */
+  flex-shrink: 1;
+}
+.input-area {
+  overflow: hidden; /* prevent button row pushing right on narrow windows */
+}
+.section-header {
+  min-width: 0;
+  overflow: hidden;
+}
+.section-header span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}

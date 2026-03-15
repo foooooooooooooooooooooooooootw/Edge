@@ -1,6 +1,6 @@
 {
   "name": "edge-fileshare",
-  "version": "1.61.0",
+  "version": "1.67.0",
   "description": "Edge \u2014 P2P file sharing",
   "main": "main.js",
   "author": {
@@ -38,7 +38,9 @@
       "upnp-transfer.js",
       "cert-gen.js",
       "emoji-data.js",
-      "holepunch.js"
+      "holepunch.js",
+      "stun-client.js",
+      "stun-server.js"
     ],
     "compression": "normal",
     "win": {

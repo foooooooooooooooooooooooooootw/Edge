@@ -135,9 +135,10 @@ ipcMain.handle('window-is-maximized', () => mainWindow?.isMaximized() ?? false);
 // ==================== LAN IPC ====================
 ipcMain.handle('get-peers', () => networkManager.getPeers());
 ipcMain.handle('send-file', async (e, { peerId, filePath, thumbnail, message }) => {
-  // Renderer pre-extracts thumbnails and passes them here
-  if (thumbnail) networkManager.setPendingThumbnail(filePath, thumbnail);
-  return networkManager.sendFile(peerId, filePath, message);
+  try {
+    if (thumbnail) networkManager.setPendingThumbnail(filePath, thumbnail);
+    return await networkManager.sendFile(peerId, filePath, message);
+  } catch (err) { return { success: false, error: err.message }; }
 });
 ipcMain.handle('send-typing', async (e, { peerId, isTyping }) => {
   try { await networkManager.sendTyping(peerId, isTyping); } catch {}
@@ -272,60 +273,91 @@ ipcMain.handle('upnp-receive-init', async (_e, { code }) => {
 });
 
 // ==================== WAN Direct IPC ====================
-// Get your own shareable address (UPnP maps the transfer port so WAN peers can connect)
+// Get your own shareable address.
+// If we have UPnP: start relay + self-hosted STUN, share those endpoints.
+// If no UPnP: query public STUN servers to discover our public address.
+// The self-hosted STUN endpoint is embedded in what we share so peers
+// query US instead of third parties — fully self-contained.
 ipcMain.handle('wan-direct-get-my-address', async () => {
-  const { UPnPClient, getLocalIp } = require('./upnp-client');
-  const localIp    = getLocalIp();
+  const { getLocalIp } = require('./upnp-client');
+  const { getPublicAddress } = require('./stun-client');
+  const localIp      = getLocalIp();
   const transferPort = networkManager.getTransferPort();
+  const punchPort    = transferPort + 1;
 
-  // Try UPnP to get public IP + open port
+  // UPnP first — if it succeeds we get a real public IP AND can host STUN+relay
+  let upnpResult = null;
   try {
+    const { UPnPClient } = require('./upnp-client');
     const upnp = new UPnPClient();
-    await upnp.init();
-
-    // Map TCP (transfers) and UDP (relay) simultaneously
+    await upnp.init(4000);
     const [publicIp] = await Promise.all([
       upnp.getExternalIP(),
       upnp.addPortMappingWithFallback(transferPort, 'Edge-TCP', 'TCP'),
-      upnp.addPortMappingWithFallback(transferPort + 2, 'Edge-Relay', 'UDP').catch(e => {
-        console.warn('[UPnP] UDP relay mapping failed (non-fatal):', e.message);
-      }),
     ]);
-
-    if (publicIp) {
-      let relayEndpoint = null;
-      try {
-        relayEndpoint = await networkManager.startRelayServer(publicIp, upnp);
-      } catch (e) {
-        console.warn('[UPnP] Relay server failed to start:', e.message);
-      }
-
-      console.log(`[UPnP] Public address: ${publicIp}:${transferPort}, relay: ${relayEndpoint ? JSON.stringify(relayEndpoint) : 'none'}`);
-
-      return {
-        success: true,
-        address: `${publicIp}:${transferPort}`,
-        publicIp, localIp, port: transferPort,
-        method: 'upnp',
-        hasRelay: !!relayEndpoint,
-        relayIp:   relayEndpoint?.ip   || null,
-        relayPort: relayEndpoint?.port || null,
-      };
+    const isPrivate = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(publicIp || '');
+    if (publicIp && !isPrivate) {
+      upnpResult = { publicIp, upnp };
+    } else if (isPrivate) {
+      console.warn(`[UPnP] Returned private IP ${publicIp} — double-NAT, ignoring`);
     }
   } catch (e) {
-    console.warn('[UPnP] Failed — falling back to local IP:', e.message);
+    console.warn('[UPnP] Failed:', e.message);
   }
 
-  // Fallback — return local IP with a clear reason
-  console.log(`[UPnP] Showing local IP ${localIp}:${transferPort} to user`);
-  return { success: true, address: `${localIp}:${transferPort}`, publicIp: null, localIp, port: transferPort, method: 'local', hasRelay: false };
+  // Start relay + STUN server if UPnP succeeded
+  let relayEndpoint = null;
+  let stunEndpoint  = null;
+  if (upnpResult) {
+    try {
+      relayEndpoint = await networkManager.startRelayServer(upnpResult.publicIp, upnpResult.upnp);
+      stunEndpoint  = networkManager.getStunEndpoint();
+    } catch (e) {
+      console.warn('[relay/STUN] Failed to start:', e.message);
+    }
+  }
+
+  // Determine our public address.
+  // If we have UPnP, our public IP is known. Otherwise query STUN.
+  let publicIp = upnpResult?.publicIp || null;
+  let punchStunPort = null;
+
+  if (!publicIp) {
+    // No UPnP — use third-party STUN to find our public address
+    const stunResult = await getPublicAddress(punchPort, null).catch(e => {
+      console.warn('[STUN] All servers failed:', e.message);
+      return null;
+    });
+    publicIp      = stunResult?.ip   || null;
+    punchStunPort = stunResult?.port || null;
+  } else {
+    // We have UPnP — our punch port is just the local punchPort mapped directly
+    punchStunPort = punchPort;
+  }
+
+  const address = publicIp ? `${publicIp}:${transferPort}` : `${localIp}:${transferPort}`;
+  const method  = upnpResult ? 'upnp' : publicIp ? 'stun' : 'local';
+
+  console.log(`[address] method=${method} address=${address} stunPort=${punchStunPort} selfStun=${stunEndpoint ? stunEndpoint.port : 'none'} relay=${relayEndpoint ? relayEndpoint.port : 'none'}`);
+
+  return {
+    success:   true,
+    address,
+    publicIp,  localIp,
+    port:      transferPort,
+    stunPort:  punchStunPort,       // our NAT-mapped UDP port (for peer to punch to)
+    selfStunPort: stunEndpoint?.port || null,  // our self-hosted STUN port (peer queries this)
+    method,
+    hasRelay:  !!relayEndpoint,
+    relayIp:   relayEndpoint?.ip   || null,
+    relayPort: relayEndpoint?.port || null,
+  };
 });
 
 // Add a WAN direct peer — injects into the same peer map LAN uses.
 // If we are the relay host, we issue a token for this peer.
-ipcMain.handle('wan-direct-add-peer', async (_e, { id, ip, port, label, token, relayIp, relayPort }) => {
+ipcMain.handle('wan-direct-add-peer', async (_e, { id, ip, port, label, token, relayIp, relayPort, stunPort, selfStunPort }) => {
   try {
-    // If we have relay capability, issue a token for this peer
     let peerToken = token || null;
     let peerRelayIp = relayIp || null;
     let peerRelayPort = relayPort || null;
@@ -338,9 +370,11 @@ ipcMain.handle('wan-direct-add-peer', async (_e, { id, ip, port, label, token, r
     }
 
     const peer = networkManager.addWanDirectPeer(id, ip, parseInt(port), label, {
-      token:     peerToken,
-      relayIp:   peerRelayIp,
-      relayPort: peerRelayPort,
+      token:        peerToken,
+      relayIp:      peerRelayIp,
+      relayPort:    peerRelayPort,
+      stunPort:     stunPort     ? parseInt(stunPort)     : null,
+      selfStunPort: selfStunPort ? parseInt(selfStunPort) : null, // peer's self-hosted STUN port
     });
     return { success: true, peer, token: peerToken, relayIp: peerRelayIp, relayPort: peerRelayPort };
   } catch (err) { return { success: false, error: err.message }; }

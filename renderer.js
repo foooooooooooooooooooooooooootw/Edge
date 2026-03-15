@@ -580,36 +580,48 @@ function setupEventListeners() {
   });
 }
 
+// Deliver a received message data object to the correct chat pane.
+// Called both immediately (peer already known) and from the pending queue drain.
+function deliverMessage(data, fromPeer) {
+  if (!selectedPeer && fromPeer) {
+    selectedPeer = fromPeer;
+    chatHistory = [];
+    renderedMessageCount = 0;
+    chatMessages.innerHTML = '';
+    renderPeers();
+    updateChatHeader();
+  }
+
+  if (fromPeer && fromPeer.id !== selectedPeer?.id) {
+    unreadCounts.set(fromPeer.id, (unreadCounts.get(fromPeer.id) || 0) + 1);
+    renderPeers();
+    showNotification(`${data.sender}: ${data.message.substring(0, 40)}${data.message.length > 40 ? '…' : ''}`, 'success');
+  } else {
+    const msgItem = { type: 'message', subtype: 'received', message: data.message, reply: data.reply || null, sender: data.sender || 'Unknown', senderAvatar: data.senderAvatar || null, timestamp: new Date() };
+    appendMessage(msgItem);
+    if (fromPeer && document.hasFocus()) {
+      window.electronAPI.sendReadReceipt?.(fromPeer.id, msgItem.msgId);
+    }
+    resetEdgeStreak();
+    showNotification(`Message from ${data.sender}`, 'success');
+  }
+}
+
 function setupElectronListeners() {
   // Incoming text messages
   window.electronAPI.onMessageReceived((data) => {
-    // Strip IPv6-mapped prefix so IP matching works for WAN peers
     const senderIp = (data.peerIp || '').replace(/^::ffff:/, '');
     const fromPeer = peers.find(p => p.ip === senderIp);
 
-    // Auto-select if we have no peer selected and this is the only one
-    if (!selectedPeer && fromPeer) {
-      selectedPeer = fromPeer;
-      chatHistory = [];
-      renderedMessageCount = 0;
-      chatMessages.innerHTML = '';
-      renderPeers();
-      updateChatHeader();
+    if (!fromPeer) {
+      // Peer not in list yet — queue and wait for peer-discovered
+      const q = pendingMessagesByIp.get(senderIp) || [];
+      q.push(data);
+      pendingMessagesByIp.set(senderIp, q);
+      return;
     }
 
-    if (fromPeer && fromPeer.id !== selectedPeer?.id) {
-      unreadCounts.set(fromPeer.id, (unreadCounts.get(fromPeer.id) || 0) + 1);
-      renderPeers();
-      showNotification(`${data.sender}: ${data.message.substring(0, 40)}${data.message.length > 40 ? '…' : ''}`, 'success');
-    } else {
-      const msgItem = { type: 'message', subtype: 'received', message: data.message, reply: data.reply || null, sender: data.sender || 'Unknown', senderAvatar: data.senderAvatar || null, timestamp: new Date() };
-      appendMessage(msgItem);
-      if (fromPeer && document.hasFocus()) {
-        window.electronAPI.sendReadReceipt?.(fromPeer.id, msgItem.msgId);
-      }
-      resetEdgeStreak();
-      showNotification(`Message from ${data.sender}`, 'success');
-    }
+    deliverMessage(data, fromPeer);
   });
 
   // Typing indicator
@@ -632,7 +644,6 @@ function setupElectronListeners() {
       peers.push(peer);
       renderPeers();
       showNotification(`${peer.username} joined`, 'success');
-      // Auto-select if this is the first peer and nothing is selected yet
       if (!selectedPeer) {
         selectedPeer = peer;
         chatHistory = [];
@@ -641,6 +652,12 @@ function setupElectronListeners() {
         renderPeers();
         updateChatHeader();
       }
+    }
+    // Drain any messages that arrived before this peer was in the list
+    const queued = pendingMessagesByIp.get(peer.ip);
+    if (queued?.length) {
+      pendingMessagesByIp.delete(peer.ip);
+      for (const data of queued) deliverMessage(data, peer);
     }
   });
 
@@ -1057,7 +1074,7 @@ function renderPeerItem(peer, type) {
   return `<div class="peer-item ${isSelected ? 'selected' : ''} ${isWan ? 'wan-peer-item' : ''}" data-peer-id="${peer.id}" data-peer-type="${type}">
     ${avatarHtml}
     <div class="peer-info">
-      <div class="peer-name ${isWan ? 'wan-peer-name' : ''}">${escapeHtml(displayName)}${nicknameTag}${unread}</div>
+      <div class="peer-name ${isWan ? 'wan-peer-name' : ''}"><span class="peer-name-text">${escapeHtml(displayName)}</span>${nicknameTag}${unread}</div>
       ${subtext}
     </div>
     ${actions}
@@ -1067,6 +1084,9 @@ function renderPeerItem(peer, type) {
 
 // Track WAN connection methods: peerId → 'direct'|'relay'|'tcp'
 const wanConnectionMethods = new Map();
+// Messages that arrived before the sender's peer entry was in the list.
+// Drained when peer-discovered fires for a matching IP.
+const pendingMessagesByIp  = new Map(); // ip → [data, ...]
 
 function updateChatHeader() {
   if (!selectedPeer) {
@@ -1997,7 +2017,7 @@ async function handleSingleFilePath(filePath) {
   const message = messageInput?.value?.trim() || '';
   if (message && messageInput) messageInput.value = '';
   try {
-    await window.electronAPI.sendFile({ peerId: selectedPeer.id, filePath, message });
+    await window.electronAPI.sendFile(selectedPeer.id, filePath, message, null);
   } catch (err) { showNotification('Failed to send: ' + err.message, 'error'); }
 }
 
@@ -2019,9 +2039,11 @@ async function restoreWanDirectPeers() {
   const saved = loadWanDirectPeersFromStorage();
   for (const p of saved) {
     await window.electronAPI.wanDirectAddPeer(p.id, p.ip, p.port, p.label, {
-      token: p.token || null,
-      relayIp: p.relayIp || null,
-      relayPort: p.relayPort || null,
+      token:        p.token        || null,
+      relayIp:      p.relayIp      || null,
+      relayPort:    p.relayPort    || null,
+      stunPort:     p.stunPort     || null,
+      selfStunPort: p.selfStunPort || null,
     }).catch(() => {});
   }
 }
@@ -2042,13 +2064,22 @@ function initWANPeerModal() {
 
     try {
       const res = await window.electronAPI.wanDirectGetMyAddress();
-      if (addrEl) addrEl.value = res.address || '';
+
+      // Build the shareable address string:
+      //   ip:tcpPort+punchUdpPort@selfStunPort
+      // +punchUdpPort  = our NAT-mapped UDP port (peer punches here)
+      // @selfStunPort  = our self-hosted STUN port (peer queries us instead of Google)
+      let shareAddress = res.address || '';
+      if (res.stunPort)     shareAddress = `${shareAddress}+${res.stunPort}`;
+      if (res.selfStunPort) shareAddress = `${shareAddress}@${res.selfStunPort}`;
+      if (addrEl) addrEl.value = shareAddress;
+
       if (hintEl) {
-        if (res.method === 'upnp') {
-          const relayNote = res.hasRelay
-            ? ` · 🔄 Relay active on port ${res.relayPort}`
-            : '';
-          hintEl.innerHTML = `✓ Port opened via UPnP — share this with your peer${relayNote}`;
+        if (res.method === 'upnp' || res.method === 'stun') {
+          const selfStunNote = res.selfStunPort ? ` · 🛰 self-hosted STUN` : '';
+          const relayNote    = res.hasRelay     ? ` · 🔄 relay active`     : '';
+          const methodLabel  = res.method === 'upnp' ? 'UPnP' : 'STUN';
+          hintEl.innerHTML = `✓ Public address via ${methodLabel}${selfStunNote}${relayNote} — share this with your peer`;
           hintEl.style.color = '#4ade80';
         } else {
           const shownIp = res.address || res.localIp || '?';
@@ -2056,8 +2087,8 @@ function initWANPeerModal() {
           const virtualWarning = looksVirtual
             ? `<br><span style="color:#f87171">⚠ ${shownIp} looks like a virtual adapter (VirtualBox/VMware/Docker). Edge may be using the wrong network interface.</span>`
             : '';
-          hintEl.innerHTML = `⚠ UPnP unavailable — showing local IP <strong>${shownIp}</strong>. <a href="#" id="upnp-diagnose-link" style="color:#fb923c;text-decoration:underline">Why?</a>${virtualWarning}<br>
-            <span style="font-size:0.85em">Your peer needs to be on the same network, or use your router's public IP with port ${res.port} forwarded manually.</span>`;
+          hintEl.innerHTML = `⚠ Could not reach STUN or UPnP — showing local IP <strong>${shownIp}</strong>. <a href="#" id="upnp-diagnose-link" style="color:#fb923c;text-decoration:underline">Why?</a>${virtualWarning}<br>
+            <span style="font-size:0.85em">This only works on the same network. For internet connections, check your firewall or try again.</span>`;
           hintEl.style.color = '#fb923c';
 
           document.getElementById('upnp-diagnose-link')?.addEventListener('click', async (e) => {
@@ -2114,18 +2145,38 @@ async function addWanDirectPeer() {
   const label   = document.getElementById('wan-peer-label')?.value?.trim() || '';
   if (!addrRaw) { showNotification('Enter an ip:port address', 'error'); return; }
 
-  // Parse ip:port — handle IPv6 [::1]:port and optional #token suffix
-  let ip, port, token = null;
+  // Address format: ip:tcpPort[+punchUdpPort][@selfStunPort][#token]
+  //   +punchUdpPort  = peer's NAT-mapped UDP punch port
+  //   @selfStunPort  = peer's self-hosted STUN port (we query them, not Google)
+  //   #token         = relay auth token
+  let ip, port, token = null, stunPort = null, selfStunPort = null;
+
+  // Strip #token suffix
   const hashIdx = addrRaw.lastIndexOf('#');
-  const baseAddr = hashIdx !== -1 ? addrRaw.slice(0, hashIdx) : addrRaw;
+  let baseAddr  = hashIdx !== -1 ? addrRaw.slice(0, hashIdx) : addrRaw;
   if (hashIdx !== -1) token = addrRaw.slice(hashIdx + 1) || null;
 
+  // Strip @selfStunPort suffix
+  const atIdx = baseAddr.lastIndexOf('@');
+  if (atIdx !== -1) {
+    const maybeStun = parseInt(baseAddr.slice(atIdx + 1));
+    if (!isNaN(maybeStun)) { selfStunPort = maybeStun; baseAddr = baseAddr.slice(0, atIdx); }
+  }
+
+  // Strip +stunPort suffix
+  const plusIdx = baseAddr.lastIndexOf('+');
+  if (plusIdx !== -1) {
+    const maybePort = parseInt(baseAddr.slice(plusIdx + 1));
+    if (!isNaN(maybePort)) { stunPort = maybePort; baseAddr = baseAddr.slice(0, plusIdx); }
+  }
+
+  // Parse ip:port (IPv6 [::1]:port supported)
   const ipv6Match = baseAddr.match(/^\[(.+)\]:(\d+)$/);
   if (ipv6Match) { ip = ipv6Match[1]; port = parseInt(ipv6Match[2]); }
   else {
     const lastColon = baseAddr.lastIndexOf(':');
     if (lastColon === -1) { showNotification('Format should be ip:port', 'error'); return; }
-    ip = baseAddr.slice(0, lastColon);
+    ip   = baseAddr.slice(0, lastColon);
     port = parseInt(baseAddr.slice(lastColon + 1));
   }
   if (!ip || !port || isNaN(port)) { showNotification('Invalid address format', 'error'); return; }
@@ -2133,7 +2184,7 @@ async function addWanDirectPeer() {
   const id = 'wand-' + Date.now();
   const displayLabel = label || `${ip}:${port}`;
 
-  const result = await window.electronAPI.wanDirectAddPeer(id, ip, port, displayLabel, { token });
+  const result = await window.electronAPI.wanDirectAddPeer(id, ip, port, displayLabel, { token, stunPort, selfStunPort });
   if (!result.success) { showNotification('Failed: ' + result.error, 'error'); return; }
 
   const peerToken     = result.token     || token;
@@ -2141,16 +2192,17 @@ async function addWanDirectPeer() {
   const peerRelayPort = result.relayPort || null;
 
   const saved = loadWanDirectPeersFromStorage();
-  saved.push({ id, ip, port, label: displayLabel, token: peerToken, relayIp: peerRelayIp, relayPort: peerRelayPort });
+  saved.push({ id, ip, port, label: displayLabel, token: peerToken, relayIp: peerRelayIp, relayPort: peerRelayPort, stunPort, selfStunPort });
   saveWanDirectPeersToStorage(saved);
 
   document.getElementById('wan-peer-address').value = '';
-  document.getElementById('wan-peer-label').value = '';
+  document.getElementById('wan-peer-label').value   = '';
   document.getElementById('add-wan-peer-modal').style.display = 'none';
 
-  const relayNote = peerRelayIp ? ' · 🔄 relay available' : '';
-  showNotification(`${displayLabel} added${relayNote}`, 'success');
-  // peer-discovered event fires from main process, renderPeers auto-updates
+  const relayNote    = peerRelayIp   ? ' · 🔄 relay'        : '';
+  const stunNote     = stunPort      ? ' · ⚡ punch-ready'   : '';
+  const selfStunNote = selfStunPort  ? ' · 🛰 self-STUN'     : '';
+  showNotification(`${displayLabel} added${selfStunNote}${stunNote}${relayNote}`, 'success');
 }
 
 // ============================================================
