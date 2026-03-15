@@ -7,10 +7,11 @@ const os = require('os');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const { loadOrCreateCert, getCertFingerprint } = require('./cert-gen');
-const { generateToken, generateSessionId, RelayServer, RelayStream, HolePuncher, WanNegotiator, RELAY_PORT_OFFSET, PUNCH_UDP_OFFSET } = require('./holepunch');
+const { generateToken, generateSessionId, sessionIdFromToken, RelayServer, RelayStream, HolePuncher, WanNegotiator, RELAY_PORT_OFFSET, PUNCH_UDP_OFFSET } = require('./holepunch');
 const { StunServer } = require('./stun-server');
 
-const STUN_PORT_OFFSET = 3; // transferPort + 3 = STUN server
+const STUN_PORT_OFFSET    = 3; // transferPort + 3 = STUN server
+const WAN_TCP_PORT_OFFSET = 5; // transferPort + 5 = plain TCP for WAN peers (no TLS)
 
 const BROADCAST_PORT = 45454;
 const TRANSFER_PORT_START = 45455;
@@ -43,11 +44,21 @@ class NetworkManager extends EventEmitter {
     this._stunPort    = null;
     // Issued tokens: peerId → token (persisted in config)
     this._issuedTokens = new Map(Object.entries(this.config.issuedTokens || {}));
-    // WAN session cache: peerId → { method:'direct'|'relay'|'tcp'|'unreachable', stream?, ts? }
-    // Avoids re-negotiating on every message to the same WAN peer.
+    // WAN session cache
     this._wanSessions = new Map();
-    // STUN result cache: localPort → { ip, port, ts } — avoid re-querying on every send
+    // STUN result cache
     this._stunCache   = new Map();
+    // Reverse channel map: peerIp → socket
+    this._reverseChannels = new Map();
+    // Persistent inbound sockets: peerIp → socket (they connected to us)
+    this._inboundSockets = new Map();
+    // Persistent outbound sockets: peerId → socket (we connected to them)
+    // Reused across message sends to keep the connection alive for write-back.
+    this._outboundSockets = new Map();
+    // Dedicated plain-TCP server for WAN peers (no TLS, separate port).
+    // WAN peers connect here regardless of the LAN TLS setting.
+    this._wanServer = null;
+    this._wanTcpPort = null;
   }
 
   getEncryptLAN() { return this._encryptLAN; }
@@ -117,6 +128,7 @@ class NetworkManager extends EventEmitter {
   start() {
     this.startBroadcast();
     this.startTransferServer();
+    this.startWanServer();
     this.startPeerTimeout();
   }
 
@@ -283,6 +295,60 @@ class NetworkManager extends EventEmitter {
     });
   }
 
+  // Dedicated plain-TCP server for WAN peers.
+  // Runs on transferPort+5, no TLS, UPnP maps it separately.
+  // This ensures inbound WAN connections always reach the onSocket handler
+  // regardless of whether LAN TLS is enabled.
+  startWanServer() {
+    this._wanTcpPort = this.transferPort + WAN_TCP_PORT_OFFSET;
+    const onWanSocket = (socket) => this._handleWanSocket(socket);
+    this._wanServer = net.createServer(onWanSocket);
+    this._wanServer.listen(this._wanTcpPort, () => {
+      console.log(`[wan] Plain TCP server listening on port ${this._wanTcpPort}`);
+    });
+    this._wanServer.on('error', (e) => {
+      console.warn('[wan] WAN server error:', e.message);
+    });
+  }
+
+  getWanTcpPort() { return this._wanTcpPort; }
+
+  _handleWanSocket(socket) {
+    const remoteIp = socket.remoteAddress?.replace(/^::ffff:/, '');
+
+    // Find or auto-create WAN peer
+    let wanPeer = Array.from(this.peers.values()).find(
+      p => p.isWanDirect && p.ip === remoteIp
+    );
+    if (!wanPeer && remoteIp) {
+      const stableId = 'wand-auto-' + remoteIp.replace(/[.:]/g, '_');
+      wanPeer = Array.from(this.peers.values()).find(p => p.id === stableId);
+      if (!wanPeer) {
+        wanPeer = this.addWanDirectPeer(
+          stableId, remoteIp, TRANSFER_PORT_START, remoteIp, {}
+        );
+        console.log(`[wan] Auto-discovered WAN peer ${remoteIp}:${socket.remotePort}`);
+      }
+    }
+
+    if (wanPeer) {
+      if (!this._wanSessions.has(wanPeer.id)) {
+        this._wanSessions.set(wanPeer.id, { method: 'tcp' });
+        this.emit('wan-connection-method', { peerId: wanPeer.id, method: 'tcp' });
+      }
+      // Keep socket as write-back channel
+      this._inboundSockets.set(remoteIp, socket);
+      socket.once('close', () => {
+        if (this._inboundSockets.get(remoteIp) === socket) {
+          this._inboundSockets.delete(remoteIp);
+        }
+        this._wanSessions.delete(wanPeer.id);
+      });
+    }
+
+    this.handleIncomingTransfer(socket);
+  }
+
   startPeerTimeout() {
     this.peerTimeoutInterval = setInterval(() => {
       const now = Date.now();
@@ -323,12 +389,22 @@ class NetworkManager extends EventEmitter {
       }
 
       if (wanPeer) {
-        // Emit connection method for inbound WAN connections so both sides get the badge.
-        // The outbound side emits this in _connectWanPeer; here we handle the inbound side.
+        // Emit connection method badge for inbound connections
         if (!this._wanSessions.has(wanPeer.id)) {
           this._wanSessions.set(wanPeer.id, { method: 'tcp' });
           this.emit('wan-connection-method', { peerId: wanPeer.id, method: 'tcp' });
         }
+        // Keep socket alive as a write-back channel — lets us send to peer
+        // even when outbound TCP is blocked (asymmetric NAT).
+        // handleIncomingTransfer will NOT destroy this socket for message-type frames;
+        // we destroy it here on close instead.
+        this._inboundSockets.set(remoteIp, socket);
+        socket.once('close', () => {
+          if (this._inboundSockets.get(remoteIp) === socket) {
+            this._inboundSockets.delete(remoteIp);
+          }
+          this._wanSessions.delete(wanPeer.id);
+        });
       }
       this.handleIncomingTransfer(socket);
     };
@@ -363,6 +439,15 @@ class NetworkManager extends EventEmitter {
     const peerIp = (socket.remoteAddress || '').replace(/^::ffff:/, '');
     let pendingChunks = [];
     let transferComplete = false;
+    // For WAN inbound sockets we keep alive for write-back, just pause reading.
+    const doneReading = () => {
+      if (this._inboundSockets.get(peerIp) === socket) {
+        socket.pause(); // stop data events, keep socket writable
+        socket.removeAllListeners('data');
+      } else {
+        socket.destroy();
+      }
+    };
 
     // Store socket so we can cancel if declined
     this.activeTransfers.set(transferId, { socket });
@@ -388,17 +473,17 @@ class NetworkManager extends EventEmitter {
 
           if (fileInfo.type === 'typing') {
             this.emit('typing-received', { sender: fileInfo.sender || '', typing: !!fileInfo.typing, peerIp });
-            socket.destroy();
+            doneReading();
             return;
           }
           if (fileInfo.type === 'reaction') {
             this.emit('reaction-received', { messageId: fileInfo.messageId, emoji: fileInfo.emoji, sender: fileInfo.sender, senderName: fileInfo.senderName, peerIp });
-            socket.destroy();
+            doneReading();
             return;
           }
           if (fileInfo.type === 'read') {
             this.emit('read-receipt', { messageId: fileInfo.messageId, sender: fileInfo.sender, peerIp });
-            socket.destroy();
+            doneReading();
             return;
           }
           if (fileInfo.type === 'message' || !fileInfo.filename) {
@@ -409,7 +494,7 @@ class NetworkManager extends EventEmitter {
                 : (fileInfo.message || '');
               this.emit('message-received', { message: decoded, reply: fileInfo.reply || null, sender: fileInfo.sender || 'Unknown', senderAvatar: fileInfo.senderAvatar || null, peerIp });
             }
-            socket.destroy();
+            doneReading();
             return;
           }
 
@@ -656,130 +741,64 @@ class NetworkManager extends EventEmitter {
   // in order to negotiate. Both sides already know each other's STUN-discovered
   // public UDP port (stored in peer.stunPort when the peer was added).
   // We just punch simultaneously and TCP-over-the-punched-path follows.
-  async _connectWanPeer(peer, timeoutMs = 8000) {
+  // WAN-direct connect.
+  // Simple model:
+  //   1. Try direct TCP to peer (works if they have UPnP or public IP)
+  //   2. If that fails, check for a persistent inbound socket from peer
+  //      (they connected to us, so we write back through that socket)
+  //   3. If nothing works, queue the data and wait for them to connect to us
+  async _connectWanPeer(peer, timeoutMs = 5000) {
+    // Fast path: known working TCP
     const cached = this._wanSessions.get(peer.id);
-
-    // ── Cached relay stream ───────────────────────────────────────
-    if (cached?.method === 'relay' && cached.stream && !cached.stream.destroyed) {
-      return cached.stream;
-    }
-
-    // ── Fast path: TCP already known to work ─────────────────────
     if (cached?.method === 'tcp') {
-      return this._connectTCP(peer, timeoutMs);
+      const s = await this._connectTCP(peer, timeoutMs).catch(() => null);
+      if (s) return s;
+      // TCP stopped working — fall through to re-probe
+      this._wanSessions.delete(peer.id);
     }
 
-    // ── In-flight deduplication ───────────────────────────────────
-    // sendTyping + sendMessage can fire simultaneously — share one negotiation promise
-    if (cached?.method === 'pending') {
-      return cached.promise;
-    }
-    const neg = this._doWanNegotiation(peer, timeoutMs);
+    // In-flight dedup
+    if (cached?.method === 'pending') return cached.promise;
+
+    const neg = this._doWanConnect(peer, timeoutMs);
     this._wanSessions.set(peer.id, { method: 'pending', promise: neg });
     return neg;
   }
 
-  async _doWanNegotiation(peer, timeoutMs = 8000) {
-    const cached = this._wanSessions.get(peer.id);
+  async _doWanConnect(peer, timeoutMs = 5000) {
+    // Step 1: reuse cached outbound socket if still alive
+    const cached = this._outboundSockets.get(peer.id);
+    if (cached && !cached.destroyed) {
+      return cached;
+    }
 
-    // ── Step 1: Try direct TCP (fast, works if UPnP opened inbound) ──
-    const TCP_PROBE_MS = 2000;
-    const probeSocket  = await this._connectTCP(peer, TCP_PROBE_MS).catch(() => null);
-    if (probeSocket) {
-      probeSocket.destroy();
+    // Step 2: direct TCP to peer's WAN port
+    const sock = await this._connectTCP(peer, timeoutMs).catch(() => null);
+    if (sock) {
       this._wanSessions.set(peer.id, { method: 'tcp' });
       this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
-      return this._connectTCP(peer, timeoutMs);
-    }
-
-    if (cached?.method === 'unreachable') {
-      // Expire the unreachable cache after 30s — peer may have come back online
-      if (cached.ts && (Date.now() - cached.ts) < 30000) {
-        throw new Error(`${peer.username} is unreachable (retrying in ${Math.ceil((30000 - (Date.now() - cached.ts)) / 1000)}s)`);
-      }
-      this._wanSessions.delete(peer.id);
-    }
-
-    console.log(`[wan] TCP failed for ${peer.ip}:${peer.port} — trying STUN hole-punch`);
-
-    // ── Step 2: UDP hole-punch via STUN ──────────────────────────
-    // We need to know both endpoints:
-    //   - Our public UDP port: query peer's self-hosted STUN (or fall back to public STUN)
-    //   - Their public UDP port: peer.stunPort if known, otherwise predict peer.port
-    //     (many endpoint-independent NATs map the same external port for TCP and UDP
-    //      from the same source, so peer.port is a reasonable first guess)
-    const localPunchPort  = this.transferPort + PUNCH_UDP_OFFSET;
-    const remotePunchPort = peer.stunPort || peer.port;
-
-    // Query STUN to learn our own public UDP endpoint before punching.
-    // Cache the result for 5 minutes — NAT mappings are stable within a session.
-    // Prefer the peer's self-hosted STUN — already trusted, on the same network path.
-    const { getPublicAddress } = require('./stun-client');
-    const peerStunServer = peer.selfStunPort
-      ? { host: peer.ip, port: peer.selfStunPort }
-      : null;
-
-    const stunCacheKey = `${localPunchPort}`;
-    const stunCached   = this._stunCache.get(stunCacheKey);
-    const STUN_TTL_MS  = 5 * 60 * 1000;
-
-    if (!stunCached || (Date.now() - stunCached.ts) > STUN_TTL_MS) {
-      try {
-        const stunResult = await getPublicAddress(localPunchPort, peerStunServer);
-        this._stunCache.set(stunCacheKey, { ...stunResult, ts: Date.now() });
-        console.log(`[punch] Our public punch endpoint: ${stunResult.ip}:${stunResult.port} (via ${stunResult.viaPeerStun ? 'peer STUN' : 'public STUN'})`);
-      } catch (e) {
-        console.warn('[punch] STUN query failed, proceeding with punch anyway:', e.message);
-      }
-    } else {
-      console.log(`[punch] Using cached STUN result: ${stunCached.ip}:${stunCached.port}`);
-    }
-
-    console.log(`[punch] Punching UDP ${peer.ip}:${remotePunchPort} (stunPort=${peer.stunPort ?? 'unknown — using TCP port'})`);
-    const puncher = new HolePuncher({
-      localPort:  localPunchPort,
-      remoteIp:   peer.ip,
-      remotePort: remotePunchPort,
-    });
-    const punchResult = await puncher.attempt();
-
-    if (punchResult.success) {
-      punchResult.socket.close();
-      const tcpAfterPunch = await this._connectTCP(peer, timeoutMs).catch(() => null);
-      if (tcpAfterPunch) {
-        console.log(`[punch] ✓ TCP succeeded after UDP punch`);
-        this._wanSessions.set(peer.id, { method: 'tcp' });
-        this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
-        return tcpAfterPunch;
-      }
-      console.log(`[punch] UDP punch open but TCP still blocked — trying relay`);
-    } else {
-      console.log(`[punch] UDP punch failed (symmetric NAT or firewall)`);
-    }
-
-    // ── Step 3: Relay fallback ────────────────────────────────────
-    if (peer.token && peer.relayIp && peer.relayPort) {
-      console.log(`[wan] Trying relay ${peer.relayIp}:${peer.relayPort}`);
-      const { generateSessionId } = require('./holepunch');
-      const rs = new RelayStream({
-        relayIp:   peer.relayIp,
-        relayPort: peer.relayPort,
-        token:     peer.token,
-        sessionId: generateSessionId(),
-        localPort: localPunchPort + 10,
+      // Cache it — keep alive for write-back from their side
+      this._outboundSockets.set(peer.id, sock);
+      sock.once('close', () => {
+        if (this._outboundSockets.get(peer.id) === sock) {
+          this._outboundSockets.delete(peer.id);
+          this._wanSessions.delete(peer.id);
+        }
       });
-      try {
-        await rs.connect();
-        this._wanSessions.set(peer.id, { method: 'relay', stream: rs });
-        this.emit('wan-connection-method', { peerId: peer.id, method: 'relay' });
-        return rs;
-      } catch (e) {
-        console.warn('[wan] Relay failed:', e.message);
-      }
+      return sock;
     }
 
-    this._wanSessions.set(peer.id, { method: 'unreachable', ts: Date.now() });
-    throw new Error(`Cannot reach ${peer.username} — UDP punch failed and no relay available. Ask them to open the app and click "Add WAN Peer" so they share an address with a relay.`);
+    // Step 3: use inbound socket if peer connected to us (asymmetric NAT)
+    const inbound = this._inboundSockets.get(peer.ip);
+    if (inbound && !inbound.destroyed) {
+      console.log(`[wan] Using inbound socket for ${peer.ip} (asymmetric NAT)`);
+      this._wanSessions.set(peer.id, { method: 'tcp' });
+      this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
+      return inbound;
+    }
+
+    this._wanSessions.delete(peer.id);
+    throw new Error(`Cannot reach ${peer.username} — no route. Ask them to share their address.`);
   }
 
   // Called from startTransferServer when an incoming TCP connection arrives
@@ -824,7 +843,8 @@ class NetworkManager extends EventEmitter {
     const header = JSON.stringify({ type: 'typing', typing: isTyping, sender: this.username, senderPort: this.transferPort }) + '\n\n';
     try {
       const socket = await this._connectToPeer(peer, 2000);
-      socket.write(header, () => socket.end());
+      // Don't end() for WAN peers — keep socket alive for write-back
+      if (peer.isWanDirect) { socket.write(header); } else { socket.write(header, () => socket.end()); }
     } catch {}
   }
 
@@ -840,7 +860,8 @@ class NetworkManager extends EventEmitter {
       socket.once('error', reject);
       socket.write(header, (err) => {
         if (err) return reject(err);
-        socket.end();
+        // Don't end() for WAN peers — keep socket alive for write-back
+        if (!peer.isWanDirect) socket.end();
         resolve({ success: true });
       });
     });
@@ -853,7 +874,7 @@ class NetworkManager extends EventEmitter {
     const header = JSON.stringify(payload) + '\n\n';
     try {
       const socket = await this._connectToPeer(peer, 3000);
-      socket.write(header, () => socket.end());
+      if (peer.isWanDirect) { socket.write(header); } else { socket.write(header, () => socket.end()); }
     } catch (e) { console.warn('[sendReaction] failed:', e.message); }
   }
 
@@ -864,7 +885,7 @@ class NetworkManager extends EventEmitter {
     const header = JSON.stringify(payload) + '\n\n';
     try {
       const socket = await this._connectToPeer(peer, 2000);
-      socket.write(header, () => socket.end());
+      if (peer.isWanDirect) { socket.write(header); } else { socket.write(header, () => socket.end()); }
     } catch {}
   }
 
@@ -1032,21 +1053,27 @@ class NetworkManager extends EventEmitter {
   // ── WAN Direct peers ────────────────────────────────────────
   // Inject a synthetic peer into the same peers Map so all existing
   // sendFile / sendMessage / sendTyping logic works unchanged.
-  addWanDirectPeer(id, ip, port, label, { token, relayIp, relayPort, stunPort, selfStunPort } = {}) {
+  addWanDirectPeer(id, ip, port, label, { token, relayIp, relayPort, stunPort, selfStunPort, wanPort } = {}) {
+    // wanPort: the dedicated plain-TCP WAN port (transferPort+5 = 45460)
+    // port: the main TCP port from the address string (used as fallback)
+    // WAN peers always use plain TCP (no TLS) on wanPort
+    const connectPort = wanPort || port;
     const peer = {
       id,
       ip,
-      port,
+      port:         connectPort,
+      wanPort:      connectPort,
       username:     label || `${ip}:${port}`,
       avatar:       null,
       nickname:     null,
       lastSeen:     Date.now(),
       isWanDirect:  true,
+      encrypted:    false,           // WAN peers never use TLS
       token:        token        || null,
       relayIp:      relayIp      || null,
       relayPort:    relayPort    || null,
-      stunPort:     stunPort     || null,  // peer's NAT-mapped UDP port
-      selfStunPort: selfStunPort || null,  // peer's self-hosted STUN port (transferPort+3)
+      stunPort:     stunPort     || null,
+      selfStunPort: selfStunPort || null,
     };
     this.peers.set(id, peer);
     this.emit('peer-discovered', peer);

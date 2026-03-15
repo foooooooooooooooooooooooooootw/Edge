@@ -81,7 +81,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // WAN Direct
   wanDirectGetMyAddress: () => ipcRenderer.invoke('wan-direct-get-my-address'),
   upnpDiagnose: () => ipcRenderer.invoke('upnp-diagnose'),
-  wanDirectAddPeer: (id, ip, port, label, { token, relayIp, relayPort, stunPort, selfStunPort } = {}) => ipcRenderer.invoke('wan-direct-add-peer', { id, ip, port, label, token, relayIp, relayPort, stunPort, selfStunPort }),
+  wanDirectAddPeer: (id, ip, port, label, { token, relayIp, relayPort, stunPort, selfStunPort, wanPort } = {}) => ipcRenderer.invoke('wan-direct-add-peer', { id, ip, port, label, token, relayIp, relayPort, stunPort, selfStunPort, wanPort }),
   wanDirectRemovePeer: (id) => ipcRenderer.invoke('wan-direct-remove-peer', { id }),
   wanDirectGetRelayInfo: () => ipcRenderer.invoke('wan-direct-get-relay-info'),
 

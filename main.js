@@ -284,6 +284,7 @@ ipcMain.handle('wan-direct-get-my-address', async () => {
   const localIp      = getLocalIp();
   const transferPort = networkManager.getTransferPort();
   const punchPort    = transferPort + 1;
+  const wanTcpPort   = networkManager.getWanTcpPort(); // plain TCP for WAN peers
 
   // UPnP first — if it succeeds we get a real public IP AND can host STUN+relay
   let upnpResult = null;
@@ -294,6 +295,7 @@ ipcMain.handle('wan-direct-get-my-address', async () => {
     const [publicIp] = await Promise.all([
       upnp.getExternalIP(),
       upnp.addPortMappingWithFallback(transferPort, 'Edge-TCP', 'TCP'),
+      upnp.addPortMappingWithFallback(wanTcpPort, 'Edge-WAN', 'TCP'), // map WAN plain TCP port
     ]);
     const isPrivate = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(publicIp || '');
     if (publicIp && !isPrivate) {
@@ -318,12 +320,10 @@ ipcMain.handle('wan-direct-get-my-address', async () => {
   }
 
   // Determine our public address.
-  // If we have UPnP, our public IP is known. Otherwise query STUN.
   let publicIp = upnpResult?.publicIp || null;
   let punchStunPort = null;
 
   if (!publicIp) {
-    // No UPnP — use third-party STUN to find our public address
     const stunResult = await getPublicAddress(punchPort, null).catch(e => {
       console.warn('[STUN] All servers failed:', e.message);
       return null;
@@ -331,65 +331,59 @@ ipcMain.handle('wan-direct-get-my-address', async () => {
     publicIp      = stunResult?.ip   || null;
     punchStunPort = stunResult?.port || null;
   } else {
-    // We have UPnP — our punch port is just the local punchPort mapped directly
     punchStunPort = punchPort;
   }
 
-  const address = publicIp ? `${publicIp}:${transferPort}` : `${localIp}:${transferPort}`;
+  // The shareable address uses the WAN TCP port (plain TCP, no TLS)
+  // so peers always connect to the right server.
+  const address = publicIp ? `${publicIp}:${wanTcpPort}` : `${localIp}:${wanTcpPort}`;
   const method  = upnpResult ? 'upnp' : publicIp ? 'stun' : 'local';
 
-  // Issue a global relay access token so anyone who receives our address
-  // can authenticate to our relay. We use a fixed peer ID 'global-relay-access'
-  // so the same token is reused across multiple "Get My Address" calls.
   let relayToken = null;
   if (relayEndpoint && networkManager.isRelayAvailable()) {
     relayToken = networkManager.issueTokenForPeer('global-relay-access');
     console.log(`[relay] Global access token issued`);
   }
 
-  console.log(`[address] method=${method} address=${address} stunPort=${punchStunPort} selfStun=${stunEndpoint ? stunEndpoint.port : 'none'} relay=${relayEndpoint ? relayEndpoint.port : 'none'} hasToken=${!!relayToken}`);
+  console.log(`[address] method=${method} address=${address} wanTcpPort=${wanTcpPort} stunPort=${punchStunPort} selfStun=${stunEndpoint ? stunEndpoint.port : 'none'} relay=${relayEndpoint ? relayEndpoint.port : 'none'} hasToken=${!!relayToken}`);
 
   return {
     success:   true,
     address,
     publicIp,  localIp,
-    port:      transferPort,
+    port:      wanTcpPort,  // the WAN plain-TCP port
     stunPort:  punchStunPort,
     selfStunPort: stunEndpoint?.port || null,
     method,
     hasRelay:   !!relayEndpoint,
     relayIp:    relayEndpoint?.ip   || null,
     relayPort:  relayEndpoint?.port || null,
-    relayToken,  // embed in shareable address so friend can auth to our relay
+    relayToken,
   };
 });
 
-// Add a WAN direct peer.
-// Two token scenarios:
-//   A) We have a relay: issue a new token for this peer AND register it in our relay
-//   B) Peer has a relay: they embedded their token in the address (#token suffix)
-//      → store it so we present it when connecting to their relay
-ipcMain.handle('wan-direct-add-peer', async (_e, { id, ip, port, label, token, relayIp, relayPort, stunPort, selfStunPort }) => {
+ipcMain.handle('wan-direct-add-peer', async (_e, { id, ip, port, label, token, relayIp, relayPort, stunPort, selfStunPort, wanPort }) => {
   try {
-    let peerToken    = token     || null;  // token to present when connecting to THEIR relay
-    let peerRelayIp  = relayIp  || null;
+    let peerToken     = token     || null;
+    let peerRelayIp   = relayIp   || null;
     let peerRelayPort = relayPort || null;
 
-    // If WE have a relay AND they didn't give us relay info,
-    // issue our own token so they can connect to our relay.
-    // Note: this token goes back to the renderer which can display it,
-    // but the main channel for token distribution is the #token in the address string.
     if (networkManager.isRelayAvailable() && !peerRelayIp) {
-      networkManager.issueTokenForPeer(id); // issued and stored in relay; distributed via address string
-      console.log(`[relay] Issued/refreshed token for peer ${id}`);
+      const ourToken = networkManager.issueTokenForPeer(id);
+      const ep = networkManager.getRelayEndpoint();
+      peerToken     = ourToken;
+      peerRelayIp   = ep?.ip   || null;
+      peerRelayPort = ep?.port || null;
+      console.log(`[relay] Using our relay ${peerRelayIp}:${peerRelayPort} for peer ${id}`);
     }
 
     const peer = networkManager.addWanDirectPeer(id, ip, parseInt(port), label, {
-      token:        peerToken,      // token WE present to THEIR relay
-      relayIp:      peerRelayIp,    // THEIR relay IP
-      relayPort:    peerRelayPort,  // THEIR relay port
+      token:        peerToken,
+      relayIp:      peerRelayIp,
+      relayPort:    peerRelayPort,
       stunPort:     stunPort     ? parseInt(stunPort)     : null,
       selfStunPort: selfStunPort ? parseInt(selfStunPort) : null,
+      wanPort:      wanPort      ? parseInt(wanPort)      : null,
     });
     return { success: true, peer, token: peerToken, relayIp: peerRelayIp, relayPort: peerRelayPort };
   } catch (err) { return { success: false, error: err.message }; }

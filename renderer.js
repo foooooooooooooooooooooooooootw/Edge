@@ -2060,6 +2060,7 @@ async function restoreWanDirectPeers() {
       relayPort:    p.relayPort    || null,
       stunPort:     p.stunPort     || null,
       selfStunPort: p.selfStunPort || null,
+      wanPort:      p.wanPort      || p.port || null,
     }).catch(() => {});
   }
 }

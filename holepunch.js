@@ -25,6 +25,13 @@ const RELAY_HDR_LEN     = RELAY_MAGIC.length + SESSION_ID_LEN; // 22 bytes
 function generateToken()    { return crypto.randomBytes(12).toString('hex'); }
 function generateSessionId(){ return crypto.randomBytes(12).toString('hex'); }
 
+// Derive a deterministic session ID from a shared token.
+// Both peers independently compute the same ID since they both know the token.
+// This means neither side needs to communicate the sessionId out-of-band.
+function sessionIdFromToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex').slice(0, 24);
+}
+
 // ── RelayServer ───────────────────────────────────────────────
 class RelayServer extends EventEmitter {
   constructor() {
@@ -385,6 +392,7 @@ class WanNegotiator {
 module.exports = {
   generateToken,
   generateSessionId,
+  sessionIdFromToken,
   RelayServer,
   RelayStream,
   HolePuncher,
