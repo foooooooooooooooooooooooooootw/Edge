@@ -19,8 +19,8 @@ const RELAY_PORT_OFFSET = 2;
 const PUNCH_UDP_OFFSET  = 1;
 const PUNCH_MAGIC       = Buffer.from('EDGEPUNCH\x00');
 const RELAY_MAGIC       = Buffer.from('EDGERELAY\x00');
-const SESSION_ID_LEN    = 24;
-const RELAY_HDR_LEN     = RELAY_MAGIC.length + SESSION_ID_LEN; // 34 bytes
+const SESSION_ID_LEN    = 12; // 12 bytes on wire (generateSessionId returns 24 hex chars → 12 bytes decoded)
+const RELAY_HDR_LEN     = RELAY_MAGIC.length + SESSION_ID_LEN; // 22 bytes
 
 function generateToken()    { return crypto.randomBytes(12).toString('hex'); }
 function generateSessionId(){ return crypto.randomBytes(12).toString('hex'); }

@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // LAN
@@ -115,4 +115,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onTorrentProgress: (cb) => ipcRenderer.on('torrent-progress', (e, d) => cb(d)),
   onTorrentComplete: (cb) => ipcRenderer.on('torrent-complete', (e, d) => cb(d)),
   onTorrentError: (cb) => ipcRenderer.on('torrent-error', (e, d) => cb(d)),
+  // Electron 28+: get real filesystem path from a drag-and-drop File object
+  getPathForFile: (file) => webUtils.getPathForFile(file),
 });

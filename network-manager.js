@@ -43,9 +43,11 @@ class NetworkManager extends EventEmitter {
     this._stunPort    = null;
     // Issued tokens: peerId → token (persisted in config)
     this._issuedTokens = new Map(Object.entries(this.config.issuedTokens || {}));
-    // WAN session cache: peerId → { method:'direct'|'relay'|'tcp', stream? }
+    // WAN session cache: peerId → { method:'direct'|'relay'|'tcp'|'unreachable', stream?, ts? }
     // Avoids re-negotiating on every message to the same WAN peer.
     this._wanSessions = new Map();
+    // STUN result cache: localPort → { ip, port, ts } — avoid re-querying on every send
+    this._stunCache   = new Map();
   }
 
   getEncryptLAN() { return this._encryptLAN; }
@@ -321,11 +323,12 @@ class NetworkManager extends EventEmitter {
       }
 
       if (wanPeer) {
-        // NOTE: We do NOT run _handleWanNegotiation here speculatively.
-        // It races with handleIncomingTransfer on the same socket data stream
-        // and consumes the message header before the transfer handler sees it.
-        // Punch negotiation is outbound-initiated only — the initiator opens
-        // a separate dedicated TCP connection when they need to negotiate.
+        // Emit connection method for inbound WAN connections so both sides get the badge.
+        // The outbound side emits this in _connectWanPeer; here we handle the inbound side.
+        if (!this._wanSessions.has(wanPeer.id)) {
+          this._wanSessions.set(wanPeer.id, { method: 'tcp' });
+          this.emit('wan-connection-method', { peerId: wanPeer.id, method: 'tcp' });
+        }
       }
       this.handleIncomingTransfer(socket);
     };
@@ -666,6 +669,19 @@ class NetworkManager extends EventEmitter {
       return this._connectTCP(peer, timeoutMs);
     }
 
+    // ── In-flight deduplication ───────────────────────────────────
+    // sendTyping + sendMessage can fire simultaneously — share one negotiation promise
+    if (cached?.method === 'pending') {
+      return cached.promise;
+    }
+    const neg = this._doWanNegotiation(peer, timeoutMs);
+    this._wanSessions.set(peer.id, { method: 'pending', promise: neg });
+    return neg;
+  }
+
+  async _doWanNegotiation(peer, timeoutMs = 8000) {
+    const cached = this._wanSessions.get(peer.id);
+
     // ── Step 1: Try direct TCP (fast, works if UPnP opened inbound) ──
     const TCP_PROBE_MS = 2000;
     const probeSocket  = await this._connectTCP(peer, TCP_PROBE_MS).catch(() => null);
@@ -689,49 +705,56 @@ class NetworkManager extends EventEmitter {
     // ── Step 2: UDP hole-punch via STUN ──────────────────────────
     // We need to know both endpoints:
     //   - Our public UDP port: query peer's self-hosted STUN (or fall back to public STUN)
-    //   - Their public UDP port: peer.stunPort (stored when they were added)
-    const localPunchPort = this.transferPort + PUNCH_UDP_OFFSET;
+    //   - Their public UDP port: peer.stunPort if known, otherwise predict peer.port
+    //     (many endpoint-independent NATs map the same external port for TCP and UDP
+    //      from the same source, so peer.port is a reasonable first guess)
+    const localPunchPort  = this.transferPort + PUNCH_UDP_OFFSET;
+    const remotePunchPort = peer.stunPort || peer.port;
 
-    // Query STUN to find our own public punch endpoint.
-    // Prefer the peer's self-hosted STUN server — it's already trusted and reachable.
+    // Query STUN to learn our own public UDP endpoint before punching.
+    // Cache the result for 5 minutes — NAT mappings are stable within a session.
+    // Prefer the peer's self-hosted STUN — already trusted, on the same network path.
     const { getPublicAddress } = require('./stun-client');
     const peerStunServer = peer.selfStunPort
       ? { host: peer.ip, port: peer.selfStunPort }
       : null;
 
-    let ourPunchPort = localPunchPort; // fallback: assume port maps directly (UPnP case)
-    try {
-      const stunResult = await getPublicAddress(localPunchPort, peerStunServer);
-      ourPunchPort = stunResult.port;
-      console.log(`[punch] Our public punch endpoint: ${stunResult.ip}:${stunResult.port} (via ${stunResult.viaPeerStun ? 'peer STUN' : 'public STUN'})`);
-    } catch (e) {
-      console.warn('[punch] STUN query failed, using local port as-is:', e.message);
-    }
+    const stunCacheKey = `${localPunchPort}`;
+    const stunCached   = this._stunCache.get(stunCacheKey);
+    const STUN_TTL_MS  = 5 * 60 * 1000;
 
-    if (peer.stunPort) {
-      console.log(`[punch] Punching ${peer.ip}:${peer.stunPort} from local :${localPunchPort}`);
-      const puncher = new HolePuncher({
-        localPort:  localPunchPort,
-        remoteIp:   peer.ip,
-        remotePort: peer.stunPort,
-      });
-      const punchResult = await puncher.attempt();
-
-      if (punchResult.success) {
-        punchResult.socket.close();
-        const tcpAfterPunch = await this._connectTCP(peer, timeoutMs).catch(() => null);
-        if (tcpAfterPunch) {
-          console.log(`[punch] TCP succeeded after UDP punch`);
-          this._wanSessions.set(peer.id, { method: 'tcp' });
-          this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
-          return tcpAfterPunch;
-        }
-        console.log(`[punch] UDP punch open but TCP still failed — using relay`);
-      } else {
-        console.log(`[punch] UDP punch failed (likely symmetric NAT)`);
+    if (!stunCached || (Date.now() - stunCached.ts) > STUN_TTL_MS) {
+      try {
+        const stunResult = await getPublicAddress(localPunchPort, peerStunServer);
+        this._stunCache.set(stunCacheKey, { ...stunResult, ts: Date.now() });
+        console.log(`[punch] Our public punch endpoint: ${stunResult.ip}:${stunResult.port} (via ${stunResult.viaPeerStun ? 'peer STUN' : 'public STUN'})`);
+      } catch (e) {
+        console.warn('[punch] STUN query failed, proceeding with punch anyway:', e.message);
       }
     } else {
-      console.log(`[punch] No stunPort for peer — skipping punch, going straight to relay`);
+      console.log(`[punch] Using cached STUN result: ${stunCached.ip}:${stunCached.port}`);
+    }
+
+    console.log(`[punch] Punching UDP ${peer.ip}:${remotePunchPort} (stunPort=${peer.stunPort ?? 'unknown — using TCP port'})`);
+    const puncher = new HolePuncher({
+      localPort:  localPunchPort,
+      remoteIp:   peer.ip,
+      remotePort: remotePunchPort,
+    });
+    const punchResult = await puncher.attempt();
+
+    if (punchResult.success) {
+      punchResult.socket.close();
+      const tcpAfterPunch = await this._connectTCP(peer, timeoutMs).catch(() => null);
+      if (tcpAfterPunch) {
+        console.log(`[punch] ✓ TCP succeeded after UDP punch`);
+        this._wanSessions.set(peer.id, { method: 'tcp' });
+        this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
+        return tcpAfterPunch;
+      }
+      console.log(`[punch] UDP punch open but TCP still blocked — trying relay`);
+    } else {
+      console.log(`[punch] UDP punch failed (symmetric NAT or firewall)`);
     }
 
     // ── Step 3: Relay fallback ────────────────────────────────────
@@ -756,7 +779,7 @@ class NetworkManager extends EventEmitter {
     }
 
     this._wanSessions.set(peer.id, { method: 'unreachable', ts: Date.now() });
-    throw new Error(`Cannot reach ${peer.username} — tried TCP, UDP punch, and relay`);
+    throw new Error(`Cannot reach ${peer.username} — UDP punch failed and no relay available. Ask them to open the app and click "Add WAN Peer" so they share an address with a relay.`);
   }
 
   // Called from startTransferServer when an incoming TCP connection arrives

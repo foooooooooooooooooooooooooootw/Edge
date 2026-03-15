@@ -513,7 +513,7 @@ function setupEventListeners() {
       const userInfo = await window.electronAPI.getUserInfo();
       appendMessage({ type: 'message', subtype: 'sent', message: msg, reply, sender: userInfo.username, senderAvatar: userInfo.avatar, timestamp: new Date() });
       await window.electronAPI.sendMessage(selectedPeer.id, msg, reply);
-    } catch(err) { showNotification('Failed to send message', 'error'); }
+    } catch(err) { showNotification('Failed to send: ' + err.message, 'error'); }
   };
   sendBtn?.addEventListener('click', doSendMessage);
 
@@ -1166,11 +1166,16 @@ async function handleFiles(files) {
 
   for (const file of files) {
     try {
-      // Pre-extract thumbnail so it's ready when transfer-complete fires
+      // Electron 28+: file.path is unreliable for drag-and-drop; use webUtils
+      const filePath = window.electronAPI.getPathForFile
+        ? window.electronAPI.getPathForFile(file)
+        : file.path;
+
+      if (!filePath) throw new Error(`Could not get path for "${file.name}" — try using the attach button instead`);
+
       const ext = file.name.split('.').pop().toLowerCase();
       const imageExts = ['jpg','jpeg','png','gif','bmp','webp'];
       const videoExts = ['mp4','webm','mov','avi','mkv','m4v','wmv','flv'];
-      // Thumbnail extraction — wrapped so any failure never blocks the send
       try {
         if (imageExts.includes(ext)) {
           const thumb = await readImageThumbnail(file);
@@ -1181,10 +1186,9 @@ async function handleFiles(files) {
         }
       } catch { /* thumbnail failed — send anyway */ }
 
-      sentPathCache.set(file.name, file.path);
+      sentPathCache.set(file.name, filePath);
       const cachedThumbnail = sentThumbnailCache.get(file.name) || null;
-      if (!file.path) throw new Error(`file.path is undefined for "${file.name}" — try re-selecting the file`);
-      await window.electronAPI.sendFile(selectedPeer.id, file.path, message, cachedThumbnail);
+      await window.electronAPI.sendFile(selectedPeer.id, filePath, message, cachedThumbnail);
       bumpEdgeStreak();
     } catch (err) {
       console.error('Error sending file:', err);
