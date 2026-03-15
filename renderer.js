@@ -556,21 +556,33 @@ function setupEventListeners() {
   });
 
   // Drag and drop on messages container
+  let dragDepth = 0; // track depth so dragleave on child elements doesn't reset
   messagesContainer.addEventListener('dragover', (e) => {
     e.preventDefault();
+    e.dataTransfer.dropEffect = selectedPeer ? 'copy' : 'none';
     if (selectedPeer) {
       messagesContainer.style.background = '#252525';
     }
   });
 
-  messagesContainer.addEventListener('dragleave', () => {
-    messagesContainer.style.background = '#1a1a1a';
+  messagesContainer.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    dragDepth++;
+  });
+
+  messagesContainer.addEventListener('dragleave', (e) => {
+    dragDepth--;
+    if (dragDepth <= 0) {
+      dragDepth = 0;
+      messagesContainer.style.background = '';
+    }
   });
 
   messagesContainer.addEventListener('drop', (e) => {
     e.preventDefault();
-    messagesContainer.style.background = '#1a1a1a';
-    
+    dragDepth = 0;
+    messagesContainer.style.background = '';
+
     if (!selectedPeer) {
       showNotification('Please select a peer first', 'error');
       return;
@@ -2070,12 +2082,14 @@ function initWANPeerModal() {
       const res = await window.electronAPI.wanDirectGetMyAddress();
 
       // Build the shareable address string:
-      //   ip:tcpPort+punchUdpPort@selfStunPort
+      //   ip:tcpPort[+punchUdpPort][@selfStunPort][#relayToken]
       // +punchUdpPort  = our NAT-mapped UDP port (peer punches here)
-      // @selfStunPort  = our self-hosted STUN port (peer queries us instead of Google)
+      // @selfStunPort  = our self-hosted STUN port (peer queries us, not Google)
+      // #relayToken    = token to authenticate to our relay server
       let shareAddress = res.address || '';
       if (res.stunPort)     shareAddress = `${shareAddress}+${res.stunPort}`;
       if (res.selfStunPort) shareAddress = `${shareAddress}@${res.selfStunPort}`;
+      if (res.relayToken)   shareAddress = `${shareAddress}#${res.relayToken}`;
       if (addrEl) addrEl.value = shareAddress;
 
       if (hintEl) {
@@ -2149,10 +2163,11 @@ async function addWanDirectPeer() {
   const label   = document.getElementById('wan-peer-label')?.value?.trim() || '';
   if (!addrRaw) { showNotification('Enter an ip:port address', 'error'); return; }
 
-  // Address format: ip:tcpPort[+punchUdpPort][@selfStunPort][#token]
+  // Address format: ip:tcpPort[+punchUdpPort][@selfStunPort][#relayToken]
   //   +punchUdpPort  = peer's NAT-mapped UDP punch port
   //   @selfStunPort  = peer's self-hosted STUN port (we query them, not Google)
-  //   #token         = relay auth token
+  //   #relayToken    = token to authenticate to their relay server
+  //                    relay runs at same IP, port = tcpPort + 2
   let ip, port, token = null, stunPort = null, selfStunPort = null;
 
   // Strip #token suffix
@@ -2185,27 +2200,30 @@ async function addWanDirectPeer() {
   }
   if (!ip || !port || isNaN(port)) { showNotification('Invalid address format', 'error'); return; }
 
+  // If token is present, derive relay info: relay is at same IP, port = tcpPort + 2
+  // (RELAY_PORT_OFFSET = 2, always at transferPort + 2)
+  const relayIp   = token ? ip        : null;
+  const relayPort = token ? port + 2  : null;
+
   const id = 'wand-' + Date.now();
   const displayLabel = label || `${ip}:${port}`;
 
-  const result = await window.electronAPI.wanDirectAddPeer(id, ip, port, displayLabel, { token, stunPort, selfStunPort });
+  const result = await window.electronAPI.wanDirectAddPeer(id, ip, port, displayLabel, {
+    token, stunPort, selfStunPort, relayIp, relayPort
+  });
   if (!result.success) { showNotification('Failed: ' + result.error, 'error'); return; }
 
-  const peerToken     = result.token     || token;
-  const peerRelayIp   = result.relayIp   || null;
-  const peerRelayPort = result.relayPort || null;
-
   const saved = loadWanDirectPeersFromStorage();
-  saved.push({ id, ip, port, label: displayLabel, token: peerToken, relayIp: peerRelayIp, relayPort: peerRelayPort, stunPort, selfStunPort });
+  saved.push({ id, ip, port, label: displayLabel, token, relayIp, relayPort, stunPort, selfStunPort });
   saveWanDirectPeersToStorage(saved);
 
   document.getElementById('wan-peer-address').value = '';
   document.getElementById('wan-peer-label').value   = '';
   document.getElementById('add-wan-peer-modal').style.display = 'none';
 
-  const relayNote    = peerRelayIp   ? ' · 🔄 relay'        : '';
-  const stunNote     = stunPort      ? ' · ⚡ punch-ready'   : '';
-  const selfStunNote = selfStunPort  ? ' · 🛰 self-STUN'     : '';
+  const relayNote    = relayIp      ? ' · 🔄 relay'        : '';
+  const stunNote     = stunPort     ? ' · ⚡ punch-ready'   : '';
+  const selfStunNote = selfStunPort ? ' · 🛰 self-STUN'     : '';
   showNotification(`${displayLabel} added${selfStunNote}${stunNote}${relayNote}`, 'success');
 }
 

@@ -338,43 +338,58 @@ ipcMain.handle('wan-direct-get-my-address', async () => {
   const address = publicIp ? `${publicIp}:${transferPort}` : `${localIp}:${transferPort}`;
   const method  = upnpResult ? 'upnp' : publicIp ? 'stun' : 'local';
 
-  console.log(`[address] method=${method} address=${address} stunPort=${punchStunPort} selfStun=${stunEndpoint ? stunEndpoint.port : 'none'} relay=${relayEndpoint ? relayEndpoint.port : 'none'}`);
+  // Issue a global relay access token so anyone who receives our address
+  // can authenticate to our relay. We use a fixed peer ID 'global-relay-access'
+  // so the same token is reused across multiple "Get My Address" calls.
+  let relayToken = null;
+  if (relayEndpoint && networkManager.isRelayAvailable()) {
+    relayToken = networkManager.issueTokenForPeer('global-relay-access');
+    console.log(`[relay] Global access token issued`);
+  }
+
+  console.log(`[address] method=${method} address=${address} stunPort=${punchStunPort} selfStun=${stunEndpoint ? stunEndpoint.port : 'none'} relay=${relayEndpoint ? relayEndpoint.port : 'none'} hasToken=${!!relayToken}`);
 
   return {
     success:   true,
     address,
     publicIp,  localIp,
     port:      transferPort,
-    stunPort:  punchStunPort,       // our NAT-mapped UDP port (for peer to punch to)
-    selfStunPort: stunEndpoint?.port || null,  // our self-hosted STUN port (peer queries this)
+    stunPort:  punchStunPort,
+    selfStunPort: stunEndpoint?.port || null,
     method,
-    hasRelay:  !!relayEndpoint,
-    relayIp:   relayEndpoint?.ip   || null,
-    relayPort: relayEndpoint?.port || null,
+    hasRelay:   !!relayEndpoint,
+    relayIp:    relayEndpoint?.ip   || null,
+    relayPort:  relayEndpoint?.port || null,
+    relayToken,  // embed in shareable address so friend can auth to our relay
   };
 });
 
-// Add a WAN direct peer — injects into the same peer map LAN uses.
-// If we are the relay host, we issue a token for this peer.
+// Add a WAN direct peer.
+// Two token scenarios:
+//   A) We have a relay: issue a new token for this peer AND register it in our relay
+//   B) Peer has a relay: they embedded their token in the address (#token suffix)
+//      → store it so we present it when connecting to their relay
 ipcMain.handle('wan-direct-add-peer', async (_e, { id, ip, port, label, token, relayIp, relayPort, stunPort, selfStunPort }) => {
   try {
-    let peerToken = token || null;
-    let peerRelayIp = relayIp || null;
+    let peerToken    = token     || null;  // token to present when connecting to THEIR relay
+    let peerRelayIp  = relayIp  || null;
     let peerRelayPort = relayPort || null;
 
-    if (networkManager.isRelayAvailable() && !peerToken) {
-      peerToken = networkManager.issueTokenForPeer(id);
-      const ep = networkManager.getRelayEndpoint();
-      peerRelayIp   = ep?.ip   || null;
-      peerRelayPort = ep?.port || null;
+    // If WE have a relay AND they didn't give us relay info,
+    // issue our own token so they can connect to our relay.
+    // Note: this token goes back to the renderer which can display it,
+    // but the main channel for token distribution is the #token in the address string.
+    if (networkManager.isRelayAvailable() && !peerRelayIp) {
+      networkManager.issueTokenForPeer(id); // issued and stored in relay; distributed via address string
+      console.log(`[relay] Issued/refreshed token for peer ${id}`);
     }
 
     const peer = networkManager.addWanDirectPeer(id, ip, parseInt(port), label, {
-      token:        peerToken,
-      relayIp:      peerRelayIp,
-      relayPort:    peerRelayPort,
+      token:        peerToken,      // token WE present to THEIR relay
+      relayIp:      peerRelayIp,    // THEIR relay IP
+      relayPort:    peerRelayPort,  // THEIR relay port
       stunPort:     stunPort     ? parseInt(stunPort)     : null,
-      selfStunPort: selfStunPort ? parseInt(selfStunPort) : null, // peer's self-hosted STUN port
+      selfStunPort: selfStunPort ? parseInt(selfStunPort) : null,
     });
     return { success: true, peer, token: peerToken, relayIp: peerRelayIp, relayPort: peerRelayPort };
   } catch (err) { return { success: false, error: err.message }; }
