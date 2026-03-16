@@ -300,6 +300,7 @@ let selectedPeer = null;
 let incomingFiles = new Map(); // transferId -> file data  
 let sendingFiles = new Map(); // filename -> progress data
 let chatHistory = [];
+const peerHistories = new Map(); // peerId → messages[], persists across peer switches
 let isRendering = false; // Prevent render loops
 let incomingSectionVisible = false; // Track if section is shown
 let currentMode = 'lan'; // 'lan', 'torrents'
@@ -555,61 +556,90 @@ function setupEventListeners() {
     });
   });
 
-  // Drag and drop on messages container
-  let dragDepth = 0; // track depth so dragleave on child elements doesn't reset
-  messagesContainer.addEventListener('dragover', (e) => {
+  // Drag and drop — listen on both messagesContainer and window
+  // to ensure drops are caught regardless of exact drop target
+  let dragDepth = 0;
+
+  const onDragOver = (e) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = selectedPeer ? 'copy' : 'none';
-    if (selectedPeer) {
-      messagesContainer.style.background = '#252525';
-    }
-  });
-
-  messagesContainer.addEventListener('dragenter', (e) => {
-    e.preventDefault();
-    dragDepth++;
-  });
-
-  messagesContainer.addEventListener('dragleave', (e) => {
+    if (selectedPeer) messagesContainer.style.background = '#252525';
+  };
+  const onDragEnter = (e) => { e.preventDefault(); dragDepth++; };
+  const onDragLeave = (e) => {
     dragDepth--;
-    if (dragDepth <= 0) {
-      dragDepth = 0;
-      messagesContainer.style.background = '';
-    }
-  });
-
-  messagesContainer.addEventListener('drop', (e) => {
+    if (dragDepth <= 0) { dragDepth = 0; messagesContainer.style.background = ''; }
+  };
+  const onDrop = (e) => {
     e.preventDefault();
+    e.stopPropagation(); // prevent bubbling to window handler
     dragDepth = 0;
     messagesContainer.style.background = '';
+    if (!selectedPeer) { showNotification('Select a peer first', 'error'); return; }
+    if (e.dataTransfer.files.length > 0) handleFiles(e.dataTransfer.files);
+  };
 
-    if (!selectedPeer) {
-      showNotification('Please select a peer first', 'error');
-      return;
-    }
+  const onWindowDrop = (e) => {
+    // Only handle if not already handled by messagesContainer
+    if (e.defaultPrevented) return;
+    e.preventDefault();
+    if (!selectedPeer) { showNotification('Select a peer first', 'error'); return; }
+    if (e.dataTransfer.files.length > 0) handleFiles(e.dataTransfer.files);
+  };
 
-    handleFiles(e.dataTransfer.files);
-  });
+  messagesContainer.addEventListener('dragover',  onDragOver);
+  messagesContainer.addEventListener('dragenter', onDragEnter);
+  messagesContainer.addEventListener('dragleave', onDragLeave);
+  messagesContainer.addEventListener('drop',      onDrop);
+
+  // Window-level fallback: catches drops outside messagesContainer
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop',     onWindowDrop);
 }
 
 // Deliver a received message data object to the correct chat pane.
 // Called both immediately (peer already known) and from the pending queue drain.
 function deliverMessage(data, fromPeer) {
-  if (!selectedPeer && fromPeer) {
-    selectedPeer = fromPeer;
-    chatHistory = [];
-    renderedMessageCount = 0;
-    chatMessages.innerHTML = '';
-    renderPeers();
-    updateChatHeader();
+  const msgItem = {
+    type: 'message', subtype: 'received',
+    message: data.message, reply: data.reply || null,
+    sender: data.sender || 'Unknown', senderAvatar: data.senderAvatar || null,
+    timestamp: new Date()
+  };
+
+  // Always persist to the sender's history so it survives peer switching
+  if (fromPeer) {
+    const hist = peerHistories.get(fromPeer.id) || [];
+    hist.push(msgItem);
+    peerHistories.set(fromPeer.id, hist);
   }
 
-  if (fromPeer && fromPeer.id !== selectedPeer?.id) {
+  // Auto-select peer if nothing is selected yet
+  if (!selectedPeer && fromPeer) {
+    selectedPeer = fromPeer;
+    chatHistory = peerHistories.get(fromPeer.id) || [];
+    renderedMessageCount = 0;
+    chatMessages.innerHTML = '';
+    chatHistory.forEach(m => appendMessage(m, true));
+    renderPeers();
+    updateChatHeader();
+    return; // appendMessage already called above via replay
+  }
+
+  // Is this message for the currently visible chat?
+  // Compare by ID first, fall back to IP (handles auto-discovered vs manually added same peer)
+  const isActivePeer = fromPeer && selectedPeer &&
+    (fromPeer.id === selectedPeer.id || fromPeer.ip === selectedPeer.ip);
+
+  if (fromPeer && !isActivePeer) {
+    // Not the active chat — message is already in peerHistories, just badge it
     unreadCounts.set(fromPeer.id, (unreadCounts.get(fromPeer.id) || 0) + 1);
     renderPeers();
     showNotification(`${data.sender}: ${data.message.substring(0, 40)}${data.message.length > 40 ? '…' : ''}`, 'success');
   } else {
-    const msgItem = { type: 'message', subtype: 'received', message: data.message, reply: data.reply || null, sender: data.sender || 'Unknown', senderAvatar: data.senderAvatar || null, timestamp: new Date() };
+    // Active chat — also push to live chatHistory and render
+    // Keep peerHistories in sync so peer switching always has the latest
+    if (selectedPeer) peerHistories.set(selectedPeer.id, chatHistory);
     appendMessage(msgItem);
     if (fromPeer && document.hasFocus()) {
       window.electronAPI.sendReadReceipt?.(fromPeer.id, msgItem.msgId);
@@ -658,9 +688,14 @@ function setupElectronListeners() {
       showNotification(`${peer.username} joined`, 'success');
       if (!selectedPeer) {
         selectedPeer = peer;
-        chatHistory = [];
+        chatHistory = peerHistories.get(peer.id) || [];
         renderedMessageCount = 0;
-        chatMessages.innerHTML = '<p id="chat-empty-msg" style="color:#666;text-align:center;padding:2rem;">No messages yet. Say hello!</p>';
+        chatMessages.innerHTML = '';
+        if (chatHistory.length === 0) {
+          chatMessages.innerHTML = '<p id="chat-empty-msg" style="color:#666;text-align:center;padding:2rem;">No messages yet. Say hello!</p>';
+        } else {
+          chatHistory.forEach(m => appendMessage(m, true));
+        }
         renderPeers();
         updateChatHeader();
       }
@@ -670,6 +705,18 @@ function setupElectronListeners() {
     if (queued?.length) {
       pendingMessagesByIp.delete(peer.ip);
       for (const data of queued) deliverMessage(data, peer);
+    }
+
+    // If this peer was just auto-selected, restore its full history
+    // (messages may have been delivered before peer-discovered fired)
+    if (selectedPeer?.id === peer.id) {
+      const hist = peerHistories.get(peer.id) || [];
+      if (hist.length > 0 && chatMessages.querySelector('#chat-empty-msg')) {
+        chatHistory = hist;
+        renderedMessageCount = 0;
+        chatMessages.innerHTML = '';
+        chatHistory.forEach(m => appendMessage(m, true));
+      }
     }
   });
 
@@ -919,7 +966,14 @@ async function loadPeers() {
   // Auto-select first peer if nothing selected
   if (!selectedPeer && peers.length > 0) {
     selectedPeer = peers[0];
-    chatMessages.innerHTML = '<p id="chat-empty-msg" style="color:#666;text-align:center;padding:2rem;">No messages yet. Say hello!</p>';
+    chatHistory = peerHistories.get(selectedPeer.id) || [];
+    renderedMessageCount = 0;
+    chatMessages.innerHTML = '';
+    if (chatHistory.length === 0) {
+      chatMessages.innerHTML = '<p id="chat-empty-msg" style="color:#666;text-align:center;padding:2rem;">No messages yet. Say hello!</p>';
+    } else {
+      chatHistory.forEach(m => appendMessage(m, true));
+    }
     renderPeers();
     updateChatHeader();
   }
@@ -1022,12 +1076,22 @@ function renderPeers() {
     item.addEventListener('click', (e) => {
       if (e.target.closest('.nickname-btn') || e.target.closest('.remove-wan-btn')) return;
       const peerId = item.dataset.peerId;
+      // Save current chat history before switching
+      if (selectedPeer) peerHistories.set(selectedPeer.id, [...chatHistory]);
+
       selectedPeer = peers.find(p => p.id === peerId);
       unreadCounts.delete(peerId);
       showTypingIndicator(false, '');
-      chatHistory = [];
+
+      // Restore history for the new peer
+      chatHistory = peerHistories.get(peerId) || [];
       renderedMessageCount = 0;
-      chatMessages.innerHTML = '<p id="chat-empty-msg" style="color:#666;text-align:center;padding:2rem;">No messages yet. Say hello!</p>';
+      chatMessages.innerHTML = '';
+      if (chatHistory.length === 0) {
+        chatMessages.innerHTML = '<p id="chat-empty-msg" style="color:#666;text-align:center;padding:2rem;">No messages yet. Say hello!</p>';
+      } else {
+        chatHistory.forEach(msg => appendMessage(msg, true));
+      }
       renderPeers();
       updateChatHeader();
     });
@@ -1510,8 +1574,8 @@ function markMessageRead(messageId) {
   if (tick) { tick.textContent = '✓✓'; tick.classList.add('read'); }
 }
 
-function appendMessage(item) {
-  chatHistory.push(item);
+function appendMessage(item, skipHistory = false) {
+  if (!skipHistory) chatHistory.push(item);
   const emptyMsg = document.getElementById('chat-empty-msg');
   if (emptyMsg) emptyMsg.remove();
   const el = buildMessageElement(item);

@@ -50,11 +50,19 @@ class NetworkManager extends EventEmitter {
     this._stunCache   = new Map();
     // Reverse channel map: peerIp → socket
     this._reverseChannels = new Map();
-    // Persistent inbound sockets: peerIp → socket (they connected to us)
+    // Persistent inbound sockets: peerIp → Set<socket> (they connected to us)
+    // Holds ALL active connections from a peer, not just the latest.
+    // doneReading picks any live socket from the set for write-back.
     this._inboundSockets = new Map();
     // Persistent outbound sockets: peerId → socket (we connected to them)
     // Reused across message sends to keep the connection alive for write-back.
     this._outboundSockets = new Map();
+    // Queue for WAN peers with asymmetric NAT: messages flushed on their next connection
+    this._outboundQueue = new Map();
+    // Persistent keepalive connections: peerId → { socket, timer, retryCount }
+    // When we know a peer's WAN port, we maintain a persistent outbound connection
+    // so they can always push messages down to us (Signal-style).
+    this._persistentConns = new Map();
     // Dedicated plain-TCP server for WAN peers (no TLS, separate port).
     // WAN peers connect here regardless of the LAN TLS setting.
     this._wanServer = null;
@@ -133,6 +141,13 @@ class NetworkManager extends EventEmitter {
   }
 
   stop() {
+    // Stop all persistent connections
+    for (const [, conn] of this._persistentConns.entries()) {
+      conn.stopped = true;
+      if (conn.timer) clearTimeout(conn.timer);
+      if (conn.socket && !conn.socket.destroyed) conn.socket.destroy();
+    }
+    this._persistentConns.clear();
     for (const [, transfer] of this.activeTransfers.entries()) {
       try { if (transfer.fileStream) transfer.fileStream.destroy(); } catch {}
       try { if (transfer.socket) transfer.socket.destroy(); } catch {}
@@ -302,7 +317,7 @@ class NetworkManager extends EventEmitter {
   startWanServer() {
     this._wanTcpPort = this.transferPort + WAN_TCP_PORT_OFFSET;
     const onWanSocket = (socket) => this._handleWanSocket(socket);
-    this._wanServer = net.createServer(onWanSocket);
+    this._wanServer = net.createServer({ allowHalfOpen: true }, onWanSocket);
     this._wanServer.listen(this._wanTcpPort, () => {
       console.log(`[wan] Plain TCP server listening on port ${this._wanTcpPort}`);
     });
@@ -315,19 +330,19 @@ class NetworkManager extends EventEmitter {
 
   _handleWanSocket(socket) {
     const remoteIp = socket.remoteAddress?.replace(/^::ffff:/, '');
+    console.log(`[wan] Inbound WAN connection from ${remoteIp}:${socket.remotePort}`);
 
-    // Find or auto-create WAN peer
-    let wanPeer = Array.from(this.peers.values()).find(
-      p => p.isWanDirect && p.ip === remoteIp
-    );
+    socket.setKeepAlive(true, 15000);
+    socket.setNoDelay(true);
+    socket.allowHalfOpen = true;
+
+    let wanPeer = Array.from(this.peers.values()).find(p => p.isWanDirect && p.ip === remoteIp);
     if (!wanPeer && remoteIp) {
       const stableId = 'wand-auto-' + remoteIp.replace(/[.:]/g, '_');
       wanPeer = Array.from(this.peers.values()).find(p => p.id === stableId);
       if (!wanPeer) {
-        wanPeer = this.addWanDirectPeer(
-          stableId, remoteIp, TRANSFER_PORT_START, remoteIp, {}
-        );
-        console.log(`[wan] Auto-discovered WAN peer ${remoteIp}:${socket.remotePort}`);
+        wanPeer = this.addWanDirectPeer(stableId, remoteIp, 0, remoteIp, { wanPort: 0 });
+        console.log(`[wan] Auto-discovered WAN peer ${remoteIp}`);
       }
     }
 
@@ -336,17 +351,21 @@ class NetworkManager extends EventEmitter {
         this._wanSessions.set(wanPeer.id, { method: 'tcp' });
         this.emit('wan-connection-method', { peerId: wanPeer.id, method: 'tcp' });
       }
-      // Keep socket as write-back channel
-      this._inboundSockets.set(remoteIp, socket);
-      socket.once('close', () => {
-        if (this._inboundSockets.get(remoteIp) === socket) {
-          this._inboundSockets.delete(remoteIp);
-        }
-        this._wanSessions.delete(wanPeer.id);
-      });
+      if (!this._inboundSockets.has(remoteIp)) this._inboundSockets.set(remoteIp, new Set());
+      this._inboundSockets.get(remoteIp).add(socket);
+      console.log(`[wan] Registered inbound socket from ${remoteIp}`);
+
+      const queue = this._outboundQueue.get(wanPeer.id);
+      if (queue && queue.length > 0) {
+        this._outboundQueue.delete(wanPeer.id);
+        console.log(`[wan] Flushing ${queue.length} queued msg(s) to ${remoteIp} on connect`);
+        for (const item of queue) { try { socket.write(item); } catch {} }
+      }
     }
 
-    this.handleIncomingTransfer(socket);
+    // Attach the persistent framer — handles all frame types and registers
+    // cleanup listeners exactly once. Never tears down the socket.
+    this._attachPersistentFramer(socket);
   }
 
   startPeerTimeout() {
@@ -371,18 +390,21 @@ class NetworkManager extends EventEmitter {
         p => p.isWanDirect && p.ip === remoteIp
       );
 
-      // ── Reverse discovery ──────────────────────────────────
-      // Unknown IP connecting to our port = someone added us but we haven't
-      // added them back yet (or they're on a different IP than we stored).
-      // Auto-create a peer entry so messages/files route correctly.
-      // Uses a stable ID based on IP so repeated connections don't duplicate.
-      if (!wanPeer && remoteIp) {
+      // ── Reverse discovery ──────────────────────────────────────────────────
+      // Unknown WAN IP connecting to our TLS/transfer port. Auto-create a peer
+      // entry so messages/files route correctly.
+      // GUARD: only do this if the IP is not already a known LAN peer —
+      // LAN peers connecting inbound would otherwise get a duplicate WAN entry.
+      const isKnownLanPeer = Array.from(this.peers.values()).some(
+        p => !p.isWanDirect && p.ip === remoteIp
+      );
+      if (!wanPeer && remoteIp && !isKnownLanPeer) {
         const stableId = 'wand-auto-' + remoteIp.replace(/[.:]/g, '_');
         wanPeer = Array.from(this.peers.values()).find(p => p.id === stableId);
         if (!wanPeer) {
           wanPeer = this.addWanDirectPeer(
-            stableId, remoteIp, TRANSFER_PORT_START, remoteIp,
-            { token: null, relayIp: null, relayPort: null }
+            stableId, remoteIp, this.transferPort + WAN_TCP_PORT_OFFSET, remoteIp,
+            { token: null, relayIp: null, relayPort: null, wanPort: this.transferPort + WAN_TCP_PORT_OFFSET }
           );
           console.log(`[wan] Auto-discovered incoming peer ${remoteIp}:${socket.remotePort}`);
         }
@@ -394,19 +416,27 @@ class NetworkManager extends EventEmitter {
           this._wanSessions.set(wanPeer.id, { method: 'tcp' });
           this.emit('wan-connection-method', { peerId: wanPeer.id, method: 'tcp' });
         }
-        // Keep socket alive as a write-back channel — lets us send to peer
-        // even when outbound TCP is blocked (asymmetric NAT).
-        // handleIncomingTransfer will NOT destroy this socket for message-type frames;
-        // we destroy it here on close instead.
-        this._inboundSockets.set(remoteIp, socket);
-        socket.once('close', () => {
-          if (this._inboundSockets.get(remoteIp) === socket) {
-            this._inboundSockets.delete(remoteIp);
-          }
-          this._wanSessions.delete(wanPeer.id);
-        });
+        socket.setKeepAlive(true, 15000);
+        socket.setNoDelay(true);
+        socket.allowHalfOpen = true;
+
+        if (!this._inboundSockets.has(remoteIp)) this._inboundSockets.set(remoteIp, new Set());
+        this._inboundSockets.get(remoteIp).add(socket);
+
+        // Flush any queued outbound messages immediately
+        const queueNow = this._outboundQueue.get(wanPeer.id);
+        if (queueNow && queueNow.length > 0) {
+          this._outboundQueue.delete(wanPeer.id);
+          for (const item of queueNow) { try { socket.write(item); } catch {} }
+        }
+
       }
-      this.handleIncomingTransfer(socket);
+      // WAN peer on TLS/transfer port: use persistent framer same as WAN server
+      if (wanPeer) {
+        this._attachPersistentFramer(socket);
+      } else {
+        this.handleIncomingTransfer(socket);
+      }
     };
 
     if (this._encryptLAN) {
@@ -427,6 +457,198 @@ class NetworkManager extends EventEmitter {
     });
   }
 
+  // Attach a persistent framer to a long-lived WAN socket.
+  // Processes frames one at a time from a continuous stream without ever
+  // tearing down or re-attaching listeners. Call once per socket.
+  _attachPersistentFramer(socket) {
+    if (socket._framedAttached) return;
+    socket._framedAttached = true;
+
+    const peerIp = (socket.remoteAddress || '').replace(/^::ffff:/, '');
+    let buf = Buffer.alloc(0);
+
+    // Process as many complete frames as are available in buf.
+    // A frame is: JSON-header + '\n\n' + optional binary body.
+    // For message/typing/reaction/read frames the body is empty.
+    // For file frames the body runs until socket 'end' — but we don't
+    // use the framer for file sends over persistent sockets; files get
+    // their own fresh connection so we never block the channel.
+    const processFrames = () => {
+      while (true) {
+        const sep = buf.indexOf('\n\n');
+        if (sep === -1) break; // need more data
+
+        let fileInfo;
+        try { fileInfo = JSON.parse(buf.slice(0, sep).toString()); }
+        catch { socket.destroy(); return; }
+
+        // Update peer port from senderPort in any frame
+        if (fileInfo.senderPort) {
+          const newPort = parseInt(fileInfo.senderPort);
+          const autoPeer = Array.from(this.peers.values()).find(p => p.ip === peerIp && p.isWanDirect);
+          if (autoPeer && newPort && newPort !== TRANSFER_PORT_START && autoPeer.port !== newPort) {
+            autoPeer.port = newPort;
+            autoPeer.wanPort = newPort;
+            console.log(`[wan] Updated peer ${peerIp} port to ${newPort} from frame`);
+            if (!this._persistentConns.has(autoPeer.id)) this._startPersistentConn(autoPeer);
+          }
+        }
+
+        // Flush any queued outbound messages
+        const qPeer = Array.from(this.peers.values()).find(p => p.ip === peerIp && p.isWanDirect);
+        if (qPeer) {
+          const q = this._outboundQueue.get(qPeer.id);
+          if (q && q.length > 0) {
+            this._outboundQueue.delete(qPeer.id);
+            console.log(`[wan] Flushing ${q.length} queued msg(s) to ${peerIp} via framer`);
+            for (const item of q) { try { socket.write(item); } catch {} }
+          }
+        }
+
+        if (fileInfo.type === 'typing') {
+          this.emit('typing-received', { sender: fileInfo.sender || '', typing: !!fileInfo.typing, peerIp });
+          buf = buf.slice(sep + 2);
+          continue;
+        }
+        if (fileInfo.type === 'reaction') {
+          this.emit('reaction-received', { messageId: fileInfo.messageId, emoji: fileInfo.emoji, sender: fileInfo.sender, senderName: fileInfo.senderName, peerIp });
+          buf = buf.slice(sep + 2);
+          continue;
+        }
+        if (fileInfo.type === 'read') {
+          this.emit('read-receipt', { messageId: fileInfo.messageId, sender: fileInfo.sender, peerIp });
+          buf = buf.slice(sep + 2);
+          continue;
+        }
+        if (fileInfo.type === 'message' || !fileInfo.filename) {
+          if (fileInfo.message) {
+            const decoded = fileInfo.encoding === 'base64'
+              ? Buffer.from(fileInfo.message, 'base64').toString('utf8')
+              : (fileInfo.message || '');
+            this.emit('message-received', { message: decoded, reply: fileInfo.reply || null, sender: fileInfo.sender || 'Unknown', senderAvatar: fileInfo.senderAvatar || null, peerIp });
+          }
+          buf = buf.slice(sep + 2);
+          continue;
+        }
+
+        // File frame on the persistent socket.
+        // Swap out the framer's data listener for a dedicated file receiver.
+        // The framer listener is restored once the file is fully received.
+        const bodyStart = sep + 2;
+        const fileSize = fileInfo.size || 0;
+
+        // Save any bytes already in buf beyond the header; clear buf so the
+        // framer doesn't see stale data when it resumes.
+        const bodyAlreadyInBuf = buf.slice(bodyStart);
+        buf = Buffer.alloc(0);
+
+        const transferId = crypto.randomBytes(8).toString('hex');
+        this.emit('file-incoming', {
+          transferId, filename: fileInfo.filename, size: fileInfo.size,
+          message: fileInfo.message || '', thumbnail: fileInfo.thumbnail || null,
+          sender: fileInfo.sender || 'Unknown', senderAvatar: fileInfo.senderAvatar || null, peerIp,
+        });
+
+        let fileWriteStream = null;
+        let receivedBytes = bodyAlreadyInBuf.length;
+        let pendingChunks = bodyAlreadyInBuf.length > 0 ? [bodyAlreadyInBuf] : [];
+        let savePath = null;
+        let finishing = false;
+        const hashCtx = crypto.createHash('sha256');
+        if (bodyAlreadyInBuf.length > 0) hashCtx.update(bodyAlreadyInBuf);
+
+        // Remove the framer's outer data listener while the file is in flight.
+        // This prevents buf from accumulating file bytes and avoids double-processing.
+        socket.removeListener('data', onData);
+
+        const flushPending = () => {
+          if (!fileWriteStream || !pendingChunks.length) return;
+          for (const c of pendingChunks) fileWriteStream.write(c);
+          pendingChunks = [];
+        };
+
+        const finishFile = () => {
+          if (finishing) return;
+          finishing = true;
+          socket.removeListener('data', onFileData);
+          if (fileWriteStream) {
+            flushPending();
+            fileWriteStream.end(() => {
+              this.emit('file-received', { filename: fileInfo.filename, size: fileInfo.size, hash: hashCtx.digest('hex'), path: savePath });
+              this.activeTransfers.delete(transferId);
+            });
+          }
+          // Restore the framer's data listener and process any buffered frames
+          socket.on('data', onData);
+          processFrames();
+        };
+
+        let lastProgressEmitFile = 0;
+        const onFileData = (chunk) => {
+          hashCtx.update(chunk);
+          receivedBytes += chunk.length;
+          if (fileWriteStream) { fileWriteStream.write(chunk); }
+          else { pendingChunks.push(chunk); }
+          const now = Date.now();
+          if (now - lastProgressEmitFile >= 100) {
+            lastProgressEmitFile = now;
+            this.emit('transfer-progress', {
+              transferId, filename: fileInfo.filename,
+              receivedBytes, totalBytes: fileSize,
+              progress: fileSize > 0 ? (receivedBytes / fileSize) * 100 : 0,
+              speed: 0,
+            });
+          }
+          if (receivedBytes >= fileSize) finishFile();
+        };
+
+        socket.on('data', onFileData);
+
+        this.activeTransfers.set(transferId, {
+          socket, fileInfo,
+          onSavePath: (sp) => {
+            savePath = sp;
+            fileWriteStream = fs.createWriteStream(sp);
+            flushPending();
+            if (receivedBytes >= fileSize) finishFile();
+          },
+          onDecline: () => {
+            socket.removeListener('data', onFileData);
+            socket.on('data', onData); // restore framer
+            this.activeTransfers.delete(transferId);
+            processFrames();
+          },
+        });
+
+        // If entire file was already in buf (e.g. very small file), finish immediately
+        if (receivedBytes >= fileSize) finishFile();
+
+        // Break the processFrames loop — file mode is active.
+        // processFrames resumes from finishFile/onDecline.
+        break;
+      }
+    };
+
+    // Keep a reference to the outer data handler so file mode can swap it out/in
+    const onData = (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      processFrames();
+    };
+    socket.on('data', onData);
+
+    // Clean up registries on close — only add these once
+    socket.once('close', () => {
+      const ibSet = this._inboundSockets.get(peerIp);
+      if (ibSet) { ibSet.delete(socket); if (ibSet.size === 0) this._inboundSockets.delete(peerIp); }
+      const wp = Array.from(this.peers.values()).find(p => p.ip === peerIp && p.isWanDirect);
+      if (wp) {
+        if (this._outboundSockets.get(wp.id) === socket) this._outboundSockets.delete(wp.id);
+        this._wanSessions.delete(wp.id);
+      }
+    });
+    socket.once('error', () => {}); // handled by close
+  }
+
   handleIncomingTransfer(socket) {
     let headerReceived = false;
     let fileInfo = null;
@@ -439,11 +661,14 @@ class NetworkManager extends EventEmitter {
     const peerIp = (socket.remoteAddress || '').replace(/^::ffff:/, '');
     let pendingChunks = [];
     let transferComplete = false;
-    // For WAN inbound sockets we keep alive for write-back, just pause reading.
+    // For persistent WAN sockets: after reading one message/frame, re-attach.
+    // For regular (non-persistent) sockets: destroy.
     const doneReading = () => {
-      if (this._inboundSockets.get(peerIp) === socket) {
-        socket.pause(); // stop data events, keep socket writable
+      const isInbound  = this._inboundSockets.get(peerIp)?.has(socket) ?? false;
+      const isOutbound = Array.from(this._outboundSockets.values()).includes(socket);
+      if (isInbound || isOutbound) {
         socket.removeAllListeners('data');
+        this.handleIncomingTransfer(socket);
       } else {
         socket.destroy();
       }
@@ -460,14 +685,39 @@ class NetworkManager extends EventEmitter {
         const headerEnd = headerBuffer.indexOf('\n\n');
         if (headerEnd !== -1) {
           const headerStr = headerBuffer.slice(0, headerEnd).toString();
-          fileInfo = JSON.parse(headerStr);
+          try { fileInfo = JSON.parse(headerStr); } catch (e) { console.warn('[wan] Bad header:', e.message); socket.destroy(); return; }
 
           // Handle text-only messages — check BOTH type field and absence of filename
           // If this is an auto-discovered peer, correct their port from the header
           if (fileInfo.senderPort) {
             const autoPeer = Array.from(this.peers.values()).find(p => p.ip === peerIp && p.isWanDirect);
-            if (autoPeer && autoPeer.port !== fileInfo.senderPort) {
-              autoPeer.port = parseInt(fileInfo.senderPort);
+            const newPort = parseInt(fileInfo.senderPort);
+            // Only update port if it looks like a WAN port (not the default TLS port 45455).
+            // senderPort now sends the WAN port; this guards against old clients.
+            if (autoPeer && newPort && newPort !== TRANSFER_PORT_START && autoPeer.port !== newPort) {
+              autoPeer.port = newPort;
+              autoPeer.wanPort = newPort;
+              console.log(`[wan] Updated peer ${peerIp} port to ${newPort} from header`);
+              // Now that we know their port, start a persistent outbound connection
+              // so we can reach them directly rather than relying solely on write-back.
+              // This handles the case where the peer was auto-created with port=0 before
+              // their senderPort arrived in the first message header.
+              if (!this._persistentConns.has(autoPeer.id)) {
+                this._startPersistentConn(autoPeer);
+              }
+            }
+          }
+
+          // Flush any queued outbound messages while inbound socket is still open.
+          {
+            const qPeer = Array.from(this.peers.values()).find(p => p.ip === peerIp && p.isWanDirect);
+            if (qPeer) {
+              const q = this._outboundQueue.get(qPeer.id);
+              if (q && q.length > 0) {
+                console.log(`[wan] Flushing ${q.length} queued msg(s) to ${peerIp}`);
+                this._outboundQueue.delete(qPeer.id);
+                for (const item of q) { try { socket.write(item); } catch {} }
+              }
             }
           }
 
@@ -655,24 +905,37 @@ class NetworkManager extends EventEmitter {
     });
 
     socket.on('error', (err) => {
-      console.error('Transfer socket error:', err);
-      if (fileStream) {
-        fileStream.end();
+      if (err.code !== 'ECONNABORTED' && err.code !== 'ECONNRESET' && err.code !== 'EPIPE') {
+        console.error('Transfer socket error:', err.message);
       }
+      if (peerIp) {
+        const ibSet = this._inboundSockets.get(peerIp);
+        if (ibSet) { ibSet.delete(socket); if (ibSet.size === 0) this._inboundSockets.delete(peerIp); }
+        const wp = Array.from(this.peers.values()).find(p => p.ip === peerIp && p.isWanDirect);
+        if (wp) this._wanSessions.delete(wp.id);
+      }
+      for (const [pid, s] of this._outboundSockets) { if (s === socket) { this._outboundSockets.delete(pid); break; } }
+      if (fileStream) fileStream.end();
       this.activeTransfers.delete(transferId);
+      socket.destroy();
     });
   }
 
   discardReceivedFile(transferId) {
     const transfer = this.activeTransfers.get(transferId);
-    if (transfer && transfer.socket) {
-      transfer.socket.destroy();
-    }
+    if (!transfer) { this.activeTransfers.set(transferId, { declined: true }); return; }
+    // Framer-based transfer: call the decline callback to resume the socket
+    if (transfer.onDecline) { transfer.onDecline(); return; }
+    // Legacy handleIncomingTransfer path: destroy the dedicated socket
+    if (transfer.socket) transfer.socket.destroy();
     this.activeTransfers.set(transferId, { declined: true });
   }
 
   setSavePathForTransfer(transferId, savePath) {
     const existing = this.activeTransfers.get(transferId) || {};
+    // Framer-based transfer: call the save-path callback directly
+    if (existing.onSavePath) { existing.onSavePath(savePath); return; }
+    // Legacy handleIncomingTransfer path: set savePath on the record
     existing.savePath = savePath;
     existing.accepted = true;
     this.activeTransfers.set(transferId, existing);
@@ -684,39 +947,23 @@ class NetworkManager extends EventEmitter {
   }
 
   // ── Socket factory ────────────────────────────────────────────
-  // For LAN peers: plain TCP or TLS depending on config.
-  // For WAN-direct peers: first-call negotiates hole-punch, caches result.
-  //   Subsequent calls reuse the cached method or open fresh TCP.
   async _connectToPeer(peer, timeoutMs = 5000) {
-    // ── WAN-direct path ──────────────────────────────────────
-    if (peer.isWanDirect) {
-      return this._connectWanPeer(peer, timeoutMs);
-    }
-    // ── LAN path ─────────────────────────────────────────────
+    if (peer.isWanDirect) return this._connectWanPeer(peer, timeoutMs);
     return this._connectTCP(peer, timeoutMs);
   }
 
-  // Raw TCP/TLS connect (LAN and WAN TCP fallback)
+  // Raw TCP/TLS connect (LAN peers, and outbound WAN connects)
   _connectTCP(peer, timeoutMs = 5000) {
+    if (!peer.port || peer.port === 0) return Promise.reject(new Error('No direct port known'));
     return new Promise((resolve, reject) => {
       const useTLS = this._encryptLAN && peer.encrypted;
       let socket;
-
       if (useTLS) {
-        socket = tls.connect({
-          host: peer.ip,
-          port: peer.port,
-          rejectUnauthorized: false,
-          checkServerIdentity: () => undefined,
-        });
+        socket = tls.connect({ host: peer.ip, port: peer.port, rejectUnauthorized: false, checkServerIdentity: () => undefined });
         socket.once('secureConnect', () => {
           if (peer.tlsFingerprint) {
             const actualFp = socket.getPeerCertificate()?.fingerprint256;
-            if (actualFp && actualFp !== peer.tlsFingerprint) {
-              socket.destroy();
-              reject(new Error(`TLS fingerprint mismatch for ${peer.username}`));
-              return;
-            }
+            if (actualFp && actualFp !== peer.tlsFingerprint) { socket.destroy(); reject(new Error(`TLS fingerprint mismatch for ${peer.username}`)); return; }
           }
           resolve(socket);
         });
@@ -724,81 +971,71 @@ class NetworkManager extends EventEmitter {
         socket = new net.Socket();
         socket.connect(peer.port, peer.ip, () => resolve(socket));
       }
-
       socket.once('error', reject);
       socket.setTimeout(timeoutMs, () => { socket.destroy(); reject(new Error('Connection timeout')); });
     });
   }
 
-  // WAN-direct connect.
+  // ── WAN connect: one persistent socket per peer, kept alive forever ──────
   //
-  // Priority:
-  //   1. TCP direct (UPnP opened inbound hole, or peer has public IP)
-  //   2. UDP hole-punch using STUN-discovered endpoints (works through most NAT)
-  //   3. Relay fallback (symmetric NAT / CGNAT)
+  // Strategy (tried in order, first success wins and is cached):
+  //   1. Reuse existing live socket (outbound or inbound write-back).
+  //   2. Try direct outbound TCP to peer's known WAN port.
+  //   3. Use any live inbound socket from peer (they reached us; write back).
+  //   4. Queue — wait for peer to connect to us, flush on arrival.
   //
-  // The key insight vs the old approach: we don't need TCP to reach the peer
-  // in order to negotiate. Both sides already know each other's STUN-discovered
-  // public UDP port (stored in peer.stunPort when the peer was added).
-  // We just punch simultaneously and TCP-over-the-punched-path follows.
-  // WAN-direct connect.
-  // Simple model:
-  //   1. Try direct TCP to peer (works if they have UPnP or public IP)
-  //   2. If that fails, check for a persistent inbound socket from peer
-  //      (they connected to us, so we write back through that socket)
-  //   3. If nothing works, queue the data and wait for them to connect to us
+  // Once a socket is established it stays open. keepalive is enabled so the
+  // OS kills it if the remote end disappears, and _startPersistentConn
+  // auto-reconnects on close.  No socket is ever closed by the send path.
   async _connectWanPeer(peer, timeoutMs = 5000) {
-    // Fast path: known working TCP
-    const cached = this._wanSessions.get(peer.id);
-    if (cached?.method === 'tcp') {
-      const s = await this._connectTCP(peer, timeoutMs).catch(() => null);
-      if (s) return s;
-      // TCP stopped working — fall through to re-probe
-      this._wanSessions.delete(peer.id);
-    }
+    // 1. Reuse live outbound socket (we connected to them)
+    const outbound = this._outboundSockets.get(peer.id);
+    if (outbound && !outbound.destroyed && !outbound.writableEnded) return outbound;
 
-    // In-flight dedup
-    if (cached?.method === 'pending') return cached.promise;
-
-    const neg = this._doWanConnect(peer, timeoutMs);
-    this._wanSessions.set(peer.id, { method: 'pending', promise: neg });
-    return neg;
-  }
-
-  async _doWanConnect(peer, timeoutMs = 5000) {
-    // Step 1: reuse cached outbound socket if still alive
-    const cached = this._outboundSockets.get(peer.id);
-    if (cached && !cached.destroyed) {
-      return cached;
-    }
-
-    // Step 2: direct TCP to peer's WAN port
-    const sock = await this._connectTCP(peer, timeoutMs).catch(() => null);
-    if (sock) {
+    // 2. Inbound write-back: they connected to us — use it BEFORE trying outbound TCP.
+    // This avoids a 2-second TCP timeout on every send when we know a channel exists.
+    const inboundSet = this._inboundSockets.get(peer.ip);
+    const inbound = inboundSet ? [...inboundSet].find(s => !s.destroyed && !s.writableEnded) : null;
+    if (inbound) {
+      console.log(`[wan] Write-back via inbound socket for ${peer.ip}`);
       this._wanSessions.set(peer.id, { method: 'tcp' });
       this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
-      // Cache it — keep alive for write-back from their side
-      this._outboundSockets.set(peer.id, sock);
-      sock.once('close', () => {
-        if (this._outboundSockets.get(peer.id) === sock) {
-          this._outboundSockets.delete(peer.id);
-          this._wanSessions.delete(peer.id);
-        }
-      });
-      return sock;
-    }
-
-    // Step 3: use inbound socket if peer connected to us (asymmetric NAT)
-    const inbound = this._inboundSockets.get(peer.ip);
-    if (inbound && !inbound.destroyed) {
-      console.log(`[wan] Using inbound socket for ${peer.ip} (asymmetric NAT)`);
-      this._wanSessions.set(peer.id, { method: 'tcp' });
-      this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
+      const q = this._outboundQueue.get(peer.id);
+      if (q && q.length > 0) { this._outboundQueue.delete(peer.id); for (const item of q) { try { inbound.write(item); } catch {} } }
       return inbound;
     }
 
-    this._wanSessions.delete(peer.id);
-    throw new Error(`Cannot reach ${peer.username} — no route. Ask them to share their address.`);
+    // 3. Try direct outbound TCP to peer's known port (they may have UPnP too)
+    if (peer.port && peer.port !== 0) {
+      const sock = await this._connectTCP(peer, Math.min(timeoutMs, 2000)).catch(() => null);
+      if (sock) {
+        sock.setKeepAlive(true, 15000);
+        sock.setNoDelay(true);
+        this._outboundSockets.set(peer.id, sock);
+        this._wanSessions.set(peer.id, { method: 'tcp' });
+        this.emit('wan-connection-method', { peerId: peer.id, method: 'tcp' });
+        this._attachPersistentFramer(sock);
+        const q = this._outboundQueue.get(peer.id);
+        if (q && q.length > 0) { this._outboundQueue.delete(peer.id); for (const item of q) { try { sock.write(item); } catch {} } }
+        sock.once('close', () => {
+          if (this._outboundSockets.get(peer.id) === sock) {
+            this._outboundSockets.delete(peer.id);
+            this._wanSessions.delete(peer.id);
+          }
+          if (!this._persistentConns.get(peer.id)?.stopped) {
+            setTimeout(() => { if (this.peers.has(peer.id)) this._startPersistentConn(this.peers.get(peer.id)); }, 1000);
+          }
+        });
+        sock.once('error', () => {});
+        return sock;
+      }
+    }
+
+    // 4. No route yet — queue and wait for peer's next inbound connection
+    console.log(`[wan] No route to ${peer.ip}:${peer.port} yet — queuing`);
+    const queue = this._outboundQueue.get(peer.id) || [];
+    this._outboundQueue.set(peer.id, queue);
+    return { write(d) { queue.push(d); }, end() {}, destroyed: false, writableEnded: false, _isQueue: true };
   }
 
   // Called from startTransferServer when an incoming TCP connection arrives
@@ -840,10 +1077,10 @@ class NetworkManager extends EventEmitter {
   async sendTyping(peerId, isTyping) {
     const peer = this.peers.get(peerId);
     if (!peer) return;
-    const header = JSON.stringify({ type: 'typing', typing: isTyping, sender: this.username, senderPort: this.transferPort }) + '\n\n';
+    const header = JSON.stringify({ type: 'typing', typing: isTyping, sender: this.username, senderPort: this._wanTcpPort || this.transferPort }) + '\n\n';
     try {
-      const socket = await this._connectToPeer(peer, 2000);
-      // Don't end() for WAN peers — keep socket alive for write-back
+      const socket = await this._connectToPeer(peer, 1000);
+      if (socket._isQueue || socket.destroyed || socket.writableEnded) return;
       if (peer.isWanDirect) { socket.write(header); } else { socket.write(header, () => socket.end()); }
     } catch {}
   }
@@ -852,15 +1089,15 @@ class NetworkManager extends EventEmitter {
     const peer = this.peers.get(peerId);
     if (!peer) throw new Error('Peer not found');
     const encoded = Buffer.from(message, 'utf8').toString('base64');
-    const payload = { type: 'message', message: encoded, encoding: 'base64', sender: this.username, senderAvatar: this.avatar, senderPort: this.transferPort };
+    const payload = { type: 'message', message: encoded, encoding: 'base64', sender: this.username, senderAvatar: this.avatar, senderPort: this._wanTcpPort || this.transferPort };
     if (reply) payload.reply = reply;
     const header = JSON.stringify(payload) + '\n\n';
     const socket = await this._connectToPeer(peer);
+    if (socket._isQueue) { socket.write(header); return { success: true, queued: true }; }
     return new Promise((resolve, reject) => {
       socket.once('error', reject);
       socket.write(header, (err) => {
         if (err) return reject(err);
-        // Don't end() for WAN peers — keep socket alive for write-back
         if (!peer.isWanDirect) socket.end();
         resolve({ success: true });
       });
@@ -870,7 +1107,7 @@ class NetworkManager extends EventEmitter {
   async sendReaction(peerId, messageId, emoji) {
     const peer = this.peers.get(peerId);
     if (!peer) return;
-    const payload = { type: 'reaction', messageId, emoji, sender: this.peerId, senderName: this.username, senderPort: this.transferPort };
+    const payload = { type: 'reaction', messageId, emoji, sender: this.peerId, senderName: this.username, senderPort: this._wanTcpPort || this.transferPort };
     const header = JSON.stringify(payload) + '\n\n';
     try {
       const socket = await this._connectToPeer(peer, 3000);
@@ -881,7 +1118,7 @@ class NetworkManager extends EventEmitter {
   async sendReadReceipt(peerId, messageId) {
     const peer = this.peers.get(peerId);
     if (!peer) return;
-    const payload = { type: 'read', messageId, sender: this.peerId, senderPort: this.transferPort };
+    const payload = { type: 'read', messageId, sender: this.peerId, senderPort: this._wanTcpPort || this.transferPort };
     const header = JSON.stringify(payload) + '\n\n';
     try {
       const socket = await this._connectToPeer(peer, 2000);
@@ -912,14 +1149,30 @@ class NetworkManager extends EventEmitter {
 
     const header = JSON.stringify({ filename, size: fileStats.size, message, thumbnail, sender: this.username, senderAvatar: this.avatar }) + '\n\n';
 
-    const client = await this._connectToPeer(peer);
+    // Files always use a fresh dedicated TCP connection, never the persistent socket.
+    // Streaming a large file inline would block all message frames until done and
+    // cause the receiver's framer to buffer the entire file body in RAM.
+    let client;
+    if (peer.isWanDirect) {
+      client = await this._connectTCP(peer, 5000).catch(async () => {
+        console.log(`[sendFile] Direct TCP failed for ${peer.ip}, using persistent socket`);
+        return this._connectWanPeer(peer);
+      });
+    } else {
+      client = await this._connectToPeer(peer);
+    }
     client.setNoDelay(true);
+
+    const usingPersistent = !!(this._inboundSockets.get(peer.ip)?.has(client) || this._outboundSockets.get(peerId) === client);
 
     return new Promise((resolve, reject) => {
       client.write(header);
 
       const fileStream = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 });
       let sentBytes = 0, lastProgressEmit = 0, isPaused = false;
+
+      const onDrain = () => { if (isPaused) { fileStream.resume(); isPaused = false; } };
+      client.on('drain', onDrain);
 
       fileStream.on('data', (chunk) => {
         const canContinue = client.write(chunk);
@@ -931,14 +1184,14 @@ class NetworkManager extends EventEmitter {
         }
         if (!canContinue && !isPaused) { fileStream.pause(); isPaused = true; }
       });
-      client.on('drain', () => { if (isPaused) { fileStream.resume(); isPaused = false; } });
       fileStream.on('end', () => {
-        client.end();
+        client.removeListener('drain', onDrain);
+        if (!usingPersistent) client.end();
         this.emit('transfer-complete', { peerId, filename, size: fileStats.size, message, thumbnail });
         resolve({ success: true });
       });
-      fileStream.on('error', (err) => { client.destroy(); reject(err); });
-      client.on('error', reject);
+      fileStream.on('error', (err) => { client.removeListener('drain', onDrain); if (!usingPersistent) client.destroy(); reject(err); });
+      client.once('error', (err) => { client.removeListener('drain', onDrain); reject(err); });
     });
   }
 
@@ -1077,16 +1330,99 @@ class NetworkManager extends EventEmitter {
     };
     this.peers.set(id, peer);
     this.emit('peer-discovered', peer);
+
+    // Start persistent connection if peer has a known port (they have UPnP/open port).
+    // This is the Signal-style pattern: we connect outbound once and keep it alive,
+    // so they can push messages down to us without needing our port open.
+    if (connectPort && connectPort !== 0) {
+      this._startPersistentConn(peer);
+    }
+
     return peer;
   }
 
   removeWanDirectPeer(id) {
     if (this.peers.has(id)) {
+      // Stop persistent connection if running
+      const conn = this._persistentConns.get(id);
+      if (conn) {
+        conn.stopped = true;
+        if (conn.timer) clearTimeout(conn.timer);
+        if (conn.socket && !conn.socket.destroyed) conn.socket.destroy();
+        this._persistentConns.delete(id);
+      }
       this.revokeTokenForPeer(id);
       this._wanSessions.delete(id);
       this.peers.delete(id);
       this.emit('peer-left', id);
     }
+  }
+
+  // Maintain a persistent outbound TCP connection to a WAN peer that has an open port.
+  // This is the "Signal pattern": we connect outbound once and keep it alive.
+  // The server side (peer with open port) can then push messages down to us
+  // through this persistent inbound socket — no open port needed on our side.
+  _startPersistentConn(peer) {
+    if (!peer.port || peer.port === 0) return;
+    if (this._persistentConns.get(peer.id)?.stopped) return;
+
+    const state = this._persistentConns.get(peer.id) || { retryCount: 0, stopped: false };
+    this._persistentConns.set(peer.id, state);
+
+    const attemptConnect = async () => {
+      if (state.stopped) return;
+      const currentPeer = this.peers.get(peer.id);
+      if (!currentPeer) return;
+
+      try {
+        const sock = await this._connectTCP(currentPeer, 5000);
+        sock.setKeepAlive(true, 15000);
+        sock.setNoDelay(true);
+        state.retryCount = 0;
+        state.socket = sock;
+        console.log(`[wan] Persistent connection established to ${currentPeer.ip}:${currentPeer.port}`);
+
+        // Register as outbound socket so sends reuse it
+        this._outboundSockets.set(peer.id, sock);
+
+        // Listen for messages pushed down from the server (framer, never torn down)
+        this._attachPersistentFramer(sock);
+
+        // Flush any queued messages now that we have a connection
+        const queue = this._outboundQueue.get(peer.id);
+        if (queue && queue.length > 0) {
+          console.log(`[wan] Flushing ${queue.length} queued msg(s) via persistent conn`);
+          this._outboundQueue.delete(peer.id);
+          for (const item of queue) { try { sock.write(item); } catch {} }
+        }
+
+        // Reconnect when socket closes
+        sock.once('close', () => {
+          if (this._outboundSockets.get(peer.id) === sock) {
+            this._outboundSockets.delete(peer.id);
+            this._wanSessions.delete(peer.id);
+          }
+          if (!state.stopped) {
+            const delay = Math.min(1000 * Math.pow(2, state.retryCount), 30000);
+            state.retryCount++;
+            console.log(`[wan] Persistent conn to ${currentPeer.ip} closed — reconnecting in ${delay}ms`);
+            state.timer = setTimeout(attemptConnect, delay);
+          }
+        });
+
+        sock.once('error', () => {}); // handled by close
+
+      } catch (e) {
+        if (!state.stopped) {
+          const delay = Math.min(1000 * Math.pow(2, state.retryCount), 30000);
+          state.retryCount++;
+          state.timer = setTimeout(attemptConnect, delay);
+        }
+      }
+    };
+
+    // Initial connection attempt with short delay to let startup settle
+    state.timer = setTimeout(attemptConnect, 1000);
   }
 
   // Keep WAN-direct peers "alive" — call periodically from main
