@@ -1,0 +1,59 @@
+{
+  "name": "edge",
+  "productName": "Edge",
+  "version": "1.0.0",
+  "description": "P2P messaging and file sharing over LAN and internet",
+  "main": "main.js",
+  "author": {
+    "name": "foooooooooooooooooooooooooootw",
+    "email": "foooooooooooooooooooooooooootw@gmail.com"
+  },
+  "scripts": {
+    "start":       "electron .",
+    "dev":         "electron . --enable-logging --dev",
+    "build":       "node build.js",
+    "build:win":   "node build.js --win",
+    "build:linux": "node build.js --linux",
+    "build:mac":   "node build.js --mac"
+  },
+  "build": {
+    "appId": "com.edge.p2p",
+    "productName": "Edge",
+    "copyright": "Copyright © 2025",
+    "asar": true,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build-assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "renderer/**/*",
+      "node_modules/**/*",
+      "!node_modules/electron-builder/**/*",
+      "!node_modules/.cache/**/*"
+    ],
+    "win": {
+      "target": [{ "target": "portable", "arch": ["x64"] }],
+      "artifactName": "Edge-${version}-portable-x64.exe"
+    },
+    "linux": {
+      "target": [{ "target": "AppImage", "arch": ["x64"] }],
+      "category": "Network",
+      "artifactName": "Edge-${version}-x64.AppImage"
+    },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+      "category": "public.app-category.social-networking",
+      "artifactName": "Edge-${version}-${arch}.dmg"
+    }
+  },
+  "dependencies": {
+    "nat-upnp": "^1.1.1"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  }
+}

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="ocean">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self'; img-src 'self' data: file: https://cdn.jsdelivr.net; media-src 'self' file: blob:"/>
+  <title>Edge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,400&family=JetBrains+Mono:wght@400;500&family=Noto+Color+Emoji&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<div id="app">
+
+  <!-- Title Bar -->
+  <div id="titlebar">
+    <div id="tb-left">
+      <svg id="app-icon" width="20" height="20" viewBox="0 0 24 24" fill="none">
+        <polygon points="12,2 22,7 22,17 12,22 2,17 2,7" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+        <polygon points="12,6 18,9.5 18,16.5 12,20 6,16.5 6,9.5" fill="var(--accent)" fill-opacity="0.15"/>
+        <circle cx="12" cy="12" r="2.5" fill="var(--accent)"/>
+      </svg>
+      <span id="app-name">EDGE</span>
+    </div>
+    <div id="tb-drag"></div>
+    <div id="tb-right">
+      <button class="wc-btn" id="btn-minimize">
+        <svg width="10" height="2" viewBox="0 0 10 2"><rect width="10" height="2" rx="1" fill="currentColor"/></svg>
+      </button>
+      <button class="wc-btn" id="btn-maximize">
+        <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+      </button>
+      <button class="wc-btn danger" id="btn-close">
+        <svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Layout -->
+  <div id="main">
+
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div id="my-info"><!-- JS --></div>
+
+      <div id="sidebar-toolbar">
+        <div id="upnp-pill" class="upnp-pill loading">
+          <span class="upnp-dot"></span>
+          <span id="upnp-label">UPnP…</span>
+        </div>
+        <div style="display:flex;gap:4px;">
+          <button id="add-peer-btn" title="Add peer">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add Peer
+          </button>
+          <button id="settings-btn" title="Settings">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="section-label">PEERS</div>
+      <div id="peer-list"><!-- JS --></div>
+    </aside>
+
+    <!-- Chat Panel -->
+    <div id="chat" style="display:none">
+      <div id="chat-header"><!-- JS --></div>
+      <div id="messages"><!-- JS --></div>
+      <div id="input-row">
+        <button id="attach-btn" title="Send file">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+          </svg>
+        </button>
+        <button id="emoji-btn" title="Emoji">😊</button>
+        <textarea id="msg-input" placeholder="Message…" rows="1"></textarea>
+        <button id="send-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Empty State -->
+    <div id="empty-state">
+      <div class="es-icon">
+        <svg width="56" height="56" viewBox="0 0 24 24" fill="none">
+          <polygon points="12,2 22,7 22,17 12,22 2,17 2,7" stroke="var(--accent)" stroke-width="1" fill="none" stroke-opacity="0.3"/>
+          <polygon points="12,6 18,9.5 18,16.5 12,20 6,16.5 6,9.5" fill="var(--accent)" fill-opacity="0.06"/>
+          <circle cx="12" cy="12" r="2" fill="var(--accent)" fill-opacity="0.4"/>
+        </svg>
+      </div>
+      <h2>No peer selected</h2>
+      <p>Pick someone from the left, or add a peer over the internet to start.</p>
+    </div>
+
+  </div><!-- /#main -->
+
+  <!-- Modal Overlay -->
+  <div id="modal-overlay"></div>
+
+  <!-- Settings Panel -->
+  <div id="settings-panel">
+    <div id="settings-inner"><!-- JS --></div>
+  </div>
+  <div id="settings-backdrop"></div>
+
+  <!-- Media Lightbox -->
+  <div id="lightbox">
+    <button id="lb-close">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
+    <div id="lb-content"></div>
+    <div id="lb-caption"></div>
+  </div>
+
+</div><!-- /#app -->
+<script src="renderer.js"></script>
+</body>
+</html>

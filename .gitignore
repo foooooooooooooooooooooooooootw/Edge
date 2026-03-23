@@ -1,0 +1,10 @@
+INTERNET_TRANSFERS.md
+build/
+build/icon.svg
+dist/
+dist/*
+node_modules/
+node_modules/*
+res/ss1.png
+res/ss2.png
+res/ss3.png
