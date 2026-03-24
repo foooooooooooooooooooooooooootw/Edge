@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs   = require('fs');
 
@@ -303,7 +303,34 @@ ipcMain.handle('save-received-file', async (_, { fileId, name, mime }) => {
   return ok ? { success:true, savedTo:result.filePath } : { success:false, error:'Save failed' };
 });
 
-// Returns a file:// URL for media preview — no large data over IPC.
+// dl-btn "Save" — works for both receiver temp files and sender originals
+ipcMain.handle('save-file', async (_, { fileId, name }) => {
+  const stored = net._receivedFiles.get(fileId);
+  const sent   = senderFiles.get(fileId);
+  const sourcePath = stored?.tempPath || sent?.filePath;
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
+    return { success:false, error:'File not found — it may have been moved or already saved' };
+  }
+  const result = await dialog.showSaveDialog(win, { defaultPath: name });
+  if (result.canceled) return { success:false, canceled:true };
+  const ok = await saveFileTo(sourcePath, result.filePath);
+  if (ok && stored) {
+    net.cleanupFile(fileId);
+    const mimeStr = stored.mime || '';
+    if (mimeStr.startsWith('image/') || mimeStr.startsWith('video/'))
+      senderFiles.set(fileId, { filePath: result.filePath, mime: mimeStr });
+  }
+  return ok ? { success:true, savedTo:result.filePath } : { success:false, error:'Save failed' };
+});
+
+// Open a file that was already saved to disk (shell.openPath)
+ipcMain.handle('open-file', (_, filePath) => {
+  if (!filePath || !fs.existsSync(filePath)) return { success:false, error:'File not found' };
+  shell.openPath(filePath);
+  return { success:true };
+});
+
+// Returns a file:// URL for media preview -- no large data over IPC.
 // Works for both sender (original file) and receiver (temp file, then saved file).
 const PREVIEW_RAM_LIMIT = 300 * 1024 * 1024; // 300 MB in RAM
 

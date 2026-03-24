@@ -286,7 +286,7 @@ function streakBadgeHtml(peerId) {
   const s = S.streaks.get(peerId);
   if (!s || s.count < 2) return '';
   const color = streakColor(s.count);
-  return `<div class="streak-badge" style="--streak-color:${color}" title="${s.count} files in a row!">🔥 <span>${s.count}</span></div>`;
+  return `<div class="streak-badge" style="--streak-color:${color}" title="${s.count} files in a row!">🔥 <span class="streak-count">${s.count}</span><span class="streak-label">Edge streak</span></div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -537,13 +537,25 @@ function renderChatHeader(peer) {
       '</div>' +
     '</div>';
 
-  // Wire fingerprint tooltip toggle
+  // Wire fingerprint tooltip — click to toggle, click outside to dismiss
   const badge = document.getElementById('enc-badge-btn');
   const tooltip = document.getElementById('fp-tooltip');
   if (badge && tooltip) {
-    badge.addEventListener('mouseenter', () => tooltip.classList.add('visible'));
-    badge.addEventListener('mouseleave', () => tooltip.classList.remove('visible'));
-    badge.addEventListener('click', () => tooltip.classList.toggle('visible'));
+    badge.addEventListener('click', e => {
+      e.stopPropagation();
+      const isVisible = tooltip.classList.contains('visible');
+      document.querySelectorAll('.fp-tooltip.visible').forEach(t => t.classList.remove('visible'));
+      if (!isVisible) {
+        // Position using fixed coords so it never gets clipped by overflow:hidden parents
+        const r = badge.getBoundingClientRect();
+        tooltip.style.top  = (r.bottom + 8) + 'px';
+        tooltip.style.left = r.left + 'px';
+        tooltip.classList.add('visible');
+      }
+    });
+    document.addEventListener('click', function closeFp(e) {
+      if (!badge.contains(e.target)) tooltip.classList.remove('visible');
+    });
   }
 }
 
@@ -741,16 +753,18 @@ function renderMessages(peer) {
           <div class="msg-wrap in">
             <div class="bubble media-bubble in" style="min-width:260px">
               <div class="file-meta-row" style="margin-bottom:6px">
-                <span class="file-name">${esc(item.name)}</span>
-                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" title="Save">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
+                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+                  ${item.savedTo
+                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                    : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
               <audio controls style="width:100%;height:36px" src="${esc(url)}"></audio>
             </div>
           </div>`);
       } else if (isImage(mime)) {
-        // GIFs animate automatically — no play overlay
+        // GIFs animate automatically — no play overlay, but DO show expand + download
         const isGif = mime === 'image/gif';
         html.push(`
           <div class="msg-wrap in">
@@ -758,16 +772,18 @@ function renderMessages(peer) {
               <div class="media-thumb-wrap ${isGif ? 'gif-thumb' : 'img-thumb'}"
                    data-url="${esc(url)}" data-mime="${esc(mime)}" data-name="${esc(item.name)}">
                 <img src="${url}" alt="${esc(item.name)}" loading="lazy"/>
-                ${!isGif ? `<div class="media-overlay img-overlay">
+                <div class="media-overlay img-overlay">
                   <div class="media-expand-btn">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
                   </div>
-                </div>` : ''}
+                </div>
               </div>
               <div class="file-meta-row">
-                <span class="file-name">${esc(item.name)}</span>
-                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" title="Save">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
+                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+                  ${item.savedTo
+                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                    : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
             </div>
@@ -789,9 +805,11 @@ function renderMessages(peer) {
                 </div>
               </div>
               <div class="file-meta-row">
-                <span class="file-name">${esc(item.name)}</span>
-                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" title="Save">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
+                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+                  ${item.savedTo
+                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                    : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
             </div>
@@ -808,7 +826,7 @@ function renderMessages(peer) {
           <div class="msg-wrap out">
             <div class="bubble media-bubble out" style="min-width:260px">
               <div class="file-meta-row" style="margin-bottom:6px">
-                <span class="file-name">${esc(item.name)}</span>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
               </div>
               <audio controls style="width:100%;height:36px" src="${esc(url)}"></audio>
             </div>
@@ -822,14 +840,14 @@ function renderMessages(peer) {
               <div class="media-thumb-wrap ${isGif ? 'gif-thumb' : 'img-thumb'}"
                    data-url="${esc(url)}" data-mime="${esc(mime)}" data-name="${esc(item.name)}">
                 <img src="${url}" alt="${esc(item.name)}" loading="lazy"/>
-                ${!isGif ? `<div class="media-overlay img-overlay">
+                <div class="media-overlay img-overlay">
                   <div class="media-expand-btn">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
                   </div>
-                </div>` : ''}
+                </div>
               </div>
               <div class="file-meta-row">
-                <span class="file-name">${esc(item.name)}</span>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
               </div>
             </div>
           </div>`);
@@ -850,7 +868,7 @@ function renderMessages(peer) {
                 </div>
               </div>
               <div class="file-meta-row">
-                <span class="file-name">${esc(item.name)}</span>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
               </div>
             </div>
           </div>`);
@@ -861,7 +879,7 @@ function renderMessages(peer) {
     // Standard file bubble
     const fRBar = reactionBarHtml(S.active, item.fileId);
     html.push(`
-      <div class="msg-wrap ${out ? 'out' : 'in'}" data-mid="${esc(item.fileId)}">
+      <div class="msg-wrap ${out ? 'out' : 'in'}\" data-mid="${esc(item.fileId)}">
         <div class="bubble file-bubble ${out ? 'out' : 'in'}">
           <div class="file-icon-wrap">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -869,13 +887,15 @@ function renderMessages(peer) {
             </svg>
           </div>
           <div class="file-details">
-            <div class="file-name">${esc(item.name)}</div>
+            <div class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</div>
             <div class="file-size">${fsize(item.size)}</div>
-            ${item.savedTo ? `<div class="file-saved">✓ Saved</div>` : ''}
+            ${item.savedTo ? `<div class="file-saved">✓ Saved — click to open</div>` : ''}
           </div>
           ${!out ? `
-            <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" title="Save">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+              ${item.savedTo
+                ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
             </button>` : ''}
           <div class="bubble-actions">
             <button class="bubble-btn react-btn" data-mid="${esc(item.fileId)}" title="React">😊</button>
@@ -891,10 +911,28 @@ function renderMessages(peer) {
 
   el.innerHTML = html.join('');
 
-  // Wire: save buttons
-  el.querySelectorAll('.dl-btn').forEach(btn =>
-    btn.addEventListener('click', e => { e.stopPropagation(); window.edge.saveFile(btn.dataset.fid, btn.dataset.name); })
-  );
+  // Wire: save/open buttons
+  el.querySelectorAll('.dl-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const savedTo = btn.dataset.savedTo;
+      if (savedTo) {
+        // File already saved — open it in the OS
+        window.edge.openFile(savedTo);
+      } else {
+        // Not yet saved — show save dialog
+        window.edge.saveFile(btn.dataset.fid, btn.dataset.name);
+      }
+    });
+  });
+
+  // Wire: click filename to open already-saved files
+  el.querySelectorAll('.file-name-link').forEach(span => {
+    span.addEventListener('click', e => {
+      e.stopPropagation();
+      if (span.dataset.openPath) window.edge.openFile(span.dataset.openPath);
+    });
+  });
 
   // Wire: image lightbox (static images only — not GIFs)
   el.querySelectorAll('.img-thumb').forEach(wrap => {
