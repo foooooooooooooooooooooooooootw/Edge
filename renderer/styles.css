@@ -730,17 +730,68 @@ audio {
 
 /* ── E2E fingerprint tooltip ─────────────────────────────────────── */
 .enc-badge { cursor: pointer; position: relative; overflow: visible; }
+.enc-badge-pending {
+  color: var(--text-3) !important;
+  background: rgba(120,120,140,0.08) !important;
+  border-color: rgba(120,120,140,0.2) !important;
+}
 .fp-tooltip {
   display: none; position: fixed;
   background: var(--bg-elevated); border: 1px solid var(--border);
   border-radius: 10px; padding: 10px 14px; z-index: 99999;
-  min-width: 260px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  min-width: 280px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
   white-space: normal; pointer-events: none;
 }
 .fp-tooltip.visible { display: block; pointer-events: auto; }
 .fp-label  { font-size: 10px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; }
 .fp-value  { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-1); letter-spacing: 0.08em; word-break: break-all; margin-bottom: 6px; line-height: 1.6; }
-.fp-hint   { font-size: 10px; color: var(--text-3); line-height: 1.4; }
+.fp-value-pending { color: var(--text-3) !important; font-style: italic; }
+.fp-hint   { font-size: 10px; color: var(--text-3); line-height: 1.4; flex: 1; }
+.fp-copy-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.fp-copy-btn {
+  flex-shrink: 0; font-family: 'Syne', sans-serif; font-size: 10px; font-weight: 600;
+  padding: 3px 8px; border-radius: 5px; border: 1px solid var(--border-acc);
+  background: var(--accent-dim); color: var(--accent); cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.fp-copy-btn:hover { background: var(--accent); color: #fff; }
+
+/* ── NIC link speed badge ────────────────────────────────────────── */
+.nic-speed-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-family: 'JetBrains Mono', monospace; font-size: 9px; font-weight: 500;
+  color: var(--text-3); padding: 2px 6px; border-radius: 4px;
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+  cursor: default; white-space: nowrap;
+}
+
+/* ── Peer list unread badge ──────────────────────────────────────── */
+.peer-unread {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 4px;
+  background: #ef4444; color: #fff;
+  font-family: 'Syne', sans-serif; font-size: 10px; font-weight: 700;
+  border-radius: 99px; flex-shrink: 0; line-height: 1;
+  box-shadow: 0 1px 4px rgba(239,68,68,0.4);
+  animation: unread-pop 0.2s cubic-bezier(0.34,1.56,0.64,1);
+}
+@keyframes unread-pop {
+  from { transform: scale(0.6); opacity: 0; }
+  to   { transform: scale(1);   opacity: 1; }
+}
+
+/* ── Peer list incoming file indicator ──────────────────────────── */
+.peer-file-indicator {
+  font-size: 13px; flex-shrink: 0; line-height: 1;
+  animation: pulse-in 1.4s ease-in-out infinite;
+}
+@keyframes pulse-in {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.45; }
+}
+.peer-incoming-file {
+  color: #f59e0b; font-size: 11.5px; font-weight: 500;
+}
 
 /* ── Clickable saved filenames ───────────────────────────────────── */
 .file-name-link {

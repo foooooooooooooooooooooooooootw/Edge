@@ -16,6 +16,8 @@ const S = {
   settings:      { displayName: '', profilePic: null, theme: 'ocean', fileMode: 'ask' },
   settingsTab:   'profile',
   settingsDraft: {},
+  unread:        new Map(), // peerId → count of unread messages
+  nicSpeed:      null,      // { speedMbps, iface } | null
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -304,6 +306,12 @@ function fspeed(bps) {
   return (bps / 1048576).toFixed(1) + ' MB/s';
 }
 
+function formatNicSpeed(mbps) {
+  if (!mbps || mbps <= 0) return null;
+  if (mbps >= 1000) return (mbps / 1000 % 1 === 0 ? (mbps / 1000) : (mbps / 1000).toFixed(1)) + ' Gbps';
+  return mbps + ' Mbps';
+}
+
 // Convert b64 → Blob URL — required for video (Electron can't play video data URLs)
 function b64ToBlobUrl(b64, mime) {
   try {
@@ -456,11 +464,41 @@ function renderPeerList() {
     const last    = p.messages?.[p.messages.length - 1];
     const files   = p.files || [];
     let preview   = '';
-    if (last)        preview = (last.from === 'me' ? '→ ' : '') + esc(last.text);
-    else if (files.length) preview = '📎 ' + esc(files[files.length-1].name);
-    else             preview = esc(p.ip);
+    if (last) {
+      const prefix = last.from === 'me' ? '→ ' : '';
+      // Show plain text preview (strip markdown-ish symbols for cleanliness)
+      const txt = (last.text || '').replace(/\n/g, ' ').slice(0, 80);
+      preview = prefix + esc(txt);
+    } else if (files.length) {
+      preview = '📎 ' + esc(files[files.length-1].name);
+    } else {
+      preview = esc(p.ip);
+    }
 
     const avHtml = avatarHtml(p.name, p.id, p.profilePic || null, 40, 'peer-avatar');
+
+    // ── Unread badge ──────────────────────────────────────────────
+    const unreadCount = S.unread.get(p.id) || 0;
+    const unreadBadge = (unreadCount > 0 && p.id !== S.active)
+      ? `<span class="peer-unread">${unreadCount > 99 ? '99+' : unreadCount}</span>`
+      : '';
+
+    // ── Incoming file indicator ───────────────────────────────────
+    const hasPending = p.pendingDecisions?.size > 0;
+    const hasIncoming = [...(p.inTransfers?.values() || [])].some(t => t.from === 'them' && t.status === 'receiving');
+    const fileIndicator = (hasPending || hasIncoming)
+      ? `<span class="peer-file-indicator" title="${hasPending ? 'Incoming file request' : 'Receiving file'}">📥</span>`
+      : '';
+
+    // ── Activity row: show what's happening ──────────────────────
+    let activityPreview = preview;
+    if (hasPending) {
+      const pending = [...p.pendingDecisions.values()][0];
+      activityPreview = `<span class="peer-incoming-file">📁 Incoming file: ${esc(pending.name || 'file')}</span>`;
+    } else if (hasIncoming) {
+      const incoming = [...p.inTransfers.values()].find(t => t.from === 'them' && t.status === 'receiving');
+      activityPreview = `<span class="peer-incoming-file">📥 Receiving: ${esc(incoming?.name || 'file')}</span>`;
+    }
 
     return `
     <div class="peer-item${p.id === S.active ? ' active' : ''}${!p.connected ? ' offline' : ''}" data-id="${esc(p.id)}">
@@ -469,9 +507,11 @@ function renderPeerList() {
       <div class="peer-info">
         <div class="peer-name-row">
           <span class="peer-name">${esc(p.name)}</span>
+          ${fileIndicator}
           <span class="peer-badge ${p.lan ? 'lan' : 'wan'}">${p.lan ? 'LAN' : 'WAN'}</span>
+          ${unreadBadge}
         </div>
-        <div class="peer-last">${preview}</div>
+        <div class="peer-last">${activityPreview}</div>
       </div>
     </div>`;
   }).join('');
@@ -483,6 +523,7 @@ function renderPeerList() {
 
 function selectPeer(id) {
   S.active = id;
+  S.unread.delete(id); // clear unread badge when opening chat
   renderPeerList();
   renderChatPanel();
 }
@@ -512,7 +553,20 @@ function renderChatHeader(peer) {
   const disabled  = peer.connected ? '' : 'disabled';
 
   const fp  = peer.fingerprint || null;
-  const fpLabel = fp ? fp.match(/.{1,4}/g).join(' ') : 'Establishing…';
+  const fpReady = fp && fp.length >= 8;
+  // Format fingerprint in groups of 4 for readability
+  const fpLabel = fpReady ? fp.match(/.{1,4}/g).join(' ') : null;
+  const fpDisplay = fpReady ? fpLabel : 'Establishing…';
+  // Badge style changes when fingerprint is confirmed vs pending
+  const badgePendingCls = fpReady ? '' : ' enc-badge-pending';
+
+  // NIC speed display
+  const nicInfo = S.nicSpeed?.speedMbps != null
+    ? formatNicSpeed(S.nicSpeed.speedMbps)
+    : null;
+  const nicHtml = nicInfo
+    ? `<span class="nic-speed-badge" title="NIC link speed on ${S.nicSpeed.iface || 'interface'}">\u26a1 ${esc(nicInfo)}</span>`
+    : '';
 
   $('chat-header').innerHTML =
     '<div class="ch-left">' +
@@ -520,18 +574,26 @@ function renderChatHeader(peer) {
       '<div>' +
         '<div class="ch-name" style="display:flex;align-items:center;gap:7px;overflow:visible">' +
           esc(peer.name) +
-          '<span class="enc-badge" id="enc-badge-btn">' +
+          `<span class="enc-badge${badgePendingCls}" id="enc-badge-btn">` +
             '<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">' +
               '<rect x="3" y="11" width="18" height="11" rx="2"/>' +
               '<path d="M7 11V7a5 5 0 0 1 10 0v4"/>' +
             '</svg>' +
-            ' E2E' +
+            (fpReady ? ' E2E' : ' E2E…') +
             '<div class="fp-tooltip" id="fp-tooltip">' +
               '<div class="fp-label">Session Key Fingerprint</div>' +
-              '<div class="fp-value">' + esc(fpLabel) + '</div>' +
-              '<div class="fp-hint">Verify this matches on both sides for MITM protection</div>' +
+              (fpReady
+                ? `<div class="fp-value" id="fp-value-text">${esc(fpLabel)}</div>` +
+                  '<div class="fp-copy-row">' +
+                    '<div class="fp-hint">Verify this matches on both devices for MITM protection</div>' +
+                    '<button class="fp-copy-btn" id="fp-copy-btn" title="Copy fingerprint">Copy</button>' +
+                  '</div>'
+                : '<div class="fp-value fp-value-pending">Waiting for handshake…</div>' +
+                  '<div class="fp-hint">Connect to the peer first to establish an encrypted session.</div>'
+              ) +
             '</div>' +
           '</span>' +
+          nicHtml +
         '</div>' +
         '<div class="ch-status ' + statusCls + '">' + connStatus + '</div>' +
       '</div>' +
@@ -555,6 +617,18 @@ function renderChatHeader(peer) {
     });
     document.addEventListener('click', function closeFp(e) {
       if (!badge.contains(e.target)) tooltip.classList.remove('visible');
+    });
+  }
+
+  // Wire copy button
+  const copyBtn = document.getElementById('fp-copy-btn');
+  if (copyBtn && fpReady) {
+    copyBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(fp).then(() => {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+      }).catch(() => {});
     });
   }
 }
@@ -1183,6 +1257,10 @@ function setupEvents() {
     const peer = S.peers.get(peerId);
     if (!peer) return;
     peer.messages.push(message);
+    // Increment unread count if this peer isn't currently open
+    if (S.active !== peerId) {
+      S.unread.set(peerId, (S.unread.get(peerId) || 0) + 1);
+    }
     renderPeerList();
     if (S.active === peerId) renderMessages(peer);
   });
@@ -1863,6 +1941,19 @@ async function init() {
   renderUpnpPill();
   renderPeerList();
   renderChatPanel();
+
+  // Fetch NIC speed and re-check every 10s (catches link speed changes like 1Gbps → 100Mbps)
+  async function refreshNicSpeed() {
+    try {
+      const result = await window.edge.getNicSpeed();
+      S.nicSpeed = result;
+      // Re-render header if a peer is active so the NIC badge updates
+      const peer = S.peers.get(S.active);
+      if (peer) renderChatHeader(peer);
+    } catch (_) {}
+  }
+  refreshNicSpeed();
+  setInterval(refreshNicSpeed, 10_000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

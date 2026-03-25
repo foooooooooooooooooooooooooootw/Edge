@@ -398,3 +398,81 @@ ipcMain.handle('clear-profile-pic', () => { settings.set('profilePic', null); ne
 ipcMain.handle('win-minimize', () => win?.minimize());
 ipcMain.handle('win-maximize', () => win?.isMaximized() ? win.unmaximize() : win.maximize());
 ipcMain.handle('win-close',    () => win?.close());
+
+// ── NIC link speed ────────────────────────────────────────────────
+ipcMain.handle('get-nic-speed', async () => {
+  const { execFile } = require('child_process');
+  const os = require('os');
+
+  // Get the active interface name from os.networkInterfaces()
+  const ifaces = os.networkInterfaces();
+  // Find the interface that has the peer's IP or just the first non-loopback IPv4
+  let activeIface = null;
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    if (!addrs) continue;
+    for (const a of addrs) {
+      if (a.family === 'IPv4' && !a.internal) {
+        activeIface = name;
+        break;
+      }
+    }
+    if (activeIface) break;
+  }
+
+  if (!activeIface) return { speedMbps: null, iface: null };
+
+  return new Promise(resolve => {
+    const plat = process.platform;
+
+    if (plat === 'linux') {
+      // /sys/class/net/<iface>/speed gives Mbps as a plain number
+      fs.readFile(`/sys/class/net/${activeIface}/speed`, 'utf8', (err, data) => {
+        if (err) return resolve({ speedMbps: null, iface: activeIface });
+        const mbps = parseInt(data.trim(), 10);
+        resolve({ speedMbps: isNaN(mbps) || mbps < 0 ? null : mbps, iface: activeIface });
+      });
+    } else if (plat === 'win32') {
+      execFile('powershell', ['-NoProfile', '-Command',
+        `Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -First 1 LinkSpeed | ForEach-Object { $_.LinkSpeed }`
+      ], { timeout: 3000 }, (err, stdout) => {
+        if (err) return resolve({ speedMbps: null, iface: activeIface });
+        // Output looks like "1 Gbps" or "100 Mbps"
+        const raw = stdout.trim();
+        const gbMatch = raw.match(/([\d.]+)\s*Gbps/i);
+        const mbMatch = raw.match(/([\d.]+)\s*Mbps/i);
+        if (gbMatch) return resolve({ speedMbps: parseFloat(gbMatch[1]) * 1000, iface: activeIface });
+        if (mbMatch) return resolve({ speedMbps: parseFloat(mbMatch[1]), iface: activeIface });
+        resolve({ speedMbps: null, iface: activeIface });
+      });
+    } else if (plat === 'darwin') {
+      execFile('networksetup', ['-getMedia', activeIface], { timeout: 3000 }, (err, stdout) => {
+        if (err) {
+          // Fallback: try system_profiler
+          execFile('system_profiler', ['SPNetworkDataType', '-json'], { timeout: 5000 }, (e2, out2) => {
+            if (e2) return resolve({ speedMbps: null, iface: activeIface });
+            try {
+              const data = JSON.parse(out2);
+              const nets = data.SPNetworkDataType || [];
+              for (const n of nets) {
+                const spd = n['spnetwork_speed'] || n['speed'] || '';
+                const gbM = spd.match(/([\d.]+)\s*Gb/i);
+                const mbM = spd.match(/([\d.]+)\s*Mb/i);
+                if (gbM) return resolve({ speedMbps: parseFloat(gbM[1]) * 1000, iface: activeIface });
+                if (mbM) return resolve({ speedMbps: parseFloat(mbM[1]), iface: activeIface });
+              }
+            } catch (_) {}
+            resolve({ speedMbps: null, iface: activeIface });
+          });
+          return;
+        }
+        const gbM = stdout.match(/([\d.]+)\s*Gbase/i) || stdout.match(/([\d.]+)\s*Gb/i);
+        const mbM = stdout.match(/([\d.]+)\s*(Mb|baseT)/i);
+        if (gbM) return resolve({ speedMbps: parseFloat(gbM[1]) * 1000, iface: activeIface });
+        if (mbM) return resolve({ speedMbps: parseFloat(mbM[1]), iface: activeIface });
+        resolve({ speedMbps: null, iface: activeIface });
+      });
+    } else {
+      resolve({ speedMbps: null, iface: activeIface });
+    }
+  });
+});

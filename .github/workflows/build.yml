@@ -14,7 +14,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       # utp-native (WebTorrent dep) is a native module that needs node-gyp + MSVC.
       # windows-latest has MSVC 2022 installed but node-gyp needs to be told which version.

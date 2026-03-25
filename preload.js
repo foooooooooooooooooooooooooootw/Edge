@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('edge', {
   minimize:             ()                    => ipcRenderer.invoke('win-minimize'),
   maximize:             ()                    => ipcRenderer.invoke('win-maximize'),
   close:                ()                    => ipcRenderer.invoke('win-close'),
+  getNicSpeed:          ()                    => ipcRenderer.invoke('get-nic-speed'),
   on: (channel, cb) => {
     const allowed = [
       'peer-connected','peer-reconnected','peer-disconnected',
