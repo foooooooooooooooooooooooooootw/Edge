@@ -739,7 +739,11 @@ audio {
   display: none; position: fixed;
   background: var(--bg-elevated); border: 1px solid var(--border);
   border-radius: 10px; padding: 10px 14px; z-index: 99999;
+<<<<<<< HEAD
   min-width: 280px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+=======
+  min-width: 260px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+>>>>>>> 7f3f4141594f6c76c84019fc780bfc02017a961b
   white-space: normal; pointer-events: none;
 }
 .fp-tooltip.visible { display: block; pointer-events: auto; }
@@ -792,6 +796,15 @@ audio {
 .peer-incoming-file {
   color: #f59e0b; font-size: 11.5px; font-weight: 500;
 }
+
+/* ── Clickable saved filenames ───────────────────────────────────── */
+.file-name-link {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  transition: color 0.12s;
+}
+.file-name-link:hover { color: var(--accent); }
 
 /* ── Clickable saved filenames ───────────────────────────────────── */
 .file-name-link {

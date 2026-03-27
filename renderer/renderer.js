@@ -618,6 +618,7 @@ function renderChatHeader(peer) {
     document.addEventListener('click', function closeFp(e) {
       if (!badge.contains(e.target)) tooltip.classList.remove('visible');
     });
+<<<<<<< HEAD
   }
 
   // Wire copy button
@@ -630,6 +631,8 @@ function renderChatHeader(peer) {
         setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
       }).catch(() => {});
     });
+=======
+>>>>>>> 7f3f4141594f6c76c84019fc780bfc02017a961b
   }
 }
 
