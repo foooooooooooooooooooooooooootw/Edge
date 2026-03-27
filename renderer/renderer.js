@@ -16,6 +16,8 @@ const S = {
   settings:      { displayName: '', profilePic: null, theme: 'ocean', fileMode: 'ask' },
   settingsTab:   'profile',
   settingsDraft: {},
+  unread:        new Map(), // peerId → count of unread messages
+  nicSpeed:      null,      // { speedMbps, iface } | null
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -286,7 +288,7 @@ function streakBadgeHtml(peerId) {
   const s = S.streaks.get(peerId);
   if (!s || s.count < 2) return '';
   const color = streakColor(s.count);
-  return `<div class="streak-badge" style="--streak-color:${color}" title="${s.count} files in a row!">🔥 <span>${s.count}</span></div>`;
+  return `<div class="streak-badge" style="--streak-color:${color}" title="${s.count} files in a row!">🔥 <span class="streak-count">${s.count}</span><span class="streak-label">Edge streak</span></div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -302,6 +304,12 @@ function fspeed(bps) {
   if (bps < 1024)    return bps.toFixed(0) + ' B/s';
   if (bps < 1048576) return (bps / 1024).toFixed(1) + ' KB/s';
   return (bps / 1048576).toFixed(1) + ' MB/s';
+}
+
+function formatNicSpeed(mbps) {
+  if (!mbps || mbps <= 0) return null;
+  if (mbps >= 1000) return (mbps / 1000 % 1 === 0 ? (mbps / 1000) : (mbps / 1000).toFixed(1)) + ' Gbps';
+  return mbps + ' Mbps';
 }
 
 // Convert b64 → Blob URL — required for video (Electron can't play video data URLs)
@@ -456,11 +464,41 @@ function renderPeerList() {
     const last    = p.messages?.[p.messages.length - 1];
     const files   = p.files || [];
     let preview   = '';
-    if (last)        preview = (last.from === 'me' ? '→ ' : '') + esc(last.text);
-    else if (files.length) preview = '📎 ' + esc(files[files.length-1].name);
-    else             preview = esc(p.ip);
+    if (last) {
+      const prefix = last.from === 'me' ? '→ ' : '';
+      // Show plain text preview (strip markdown-ish symbols for cleanliness)
+      const txt = (last.text || '').replace(/\n/g, ' ').slice(0, 80);
+      preview = prefix + esc(txt);
+    } else if (files.length) {
+      preview = '📎 ' + esc(files[files.length-1].name);
+    } else {
+      preview = esc(p.ip);
+    }
 
     const avHtml = avatarHtml(p.name, p.id, p.profilePic || null, 40, 'peer-avatar');
+
+    // ── Unread badge ──────────────────────────────────────────────
+    const unreadCount = S.unread.get(p.id) || 0;
+    const unreadBadge = (unreadCount > 0 && p.id !== S.active)
+      ? `<span class="peer-unread">${unreadCount > 99 ? '99+' : unreadCount}</span>`
+      : '';
+
+    // ── Incoming file indicator ───────────────────────────────────
+    const hasPending = p.pendingDecisions?.size > 0;
+    const hasIncoming = [...(p.inTransfers?.values() || [])].some(t => t.from === 'them' && t.status === 'receiving');
+    const fileIndicator = (hasPending || hasIncoming)
+      ? `<span class="peer-file-indicator" title="${hasPending ? 'Incoming file request' : 'Receiving file'}">📥</span>`
+      : '';
+
+    // ── Activity row: show what's happening ──────────────────────
+    let activityPreview = preview;
+    if (hasPending) {
+      const pending = [...p.pendingDecisions.values()][0];
+      activityPreview = `<span class="peer-incoming-file">📁 Incoming file: ${esc(pending.name || 'file')}</span>`;
+    } else if (hasIncoming) {
+      const incoming = [...p.inTransfers.values()].find(t => t.from === 'them' && t.status === 'receiving');
+      activityPreview = `<span class="peer-incoming-file">📥 Receiving: ${esc(incoming?.name || 'file')}</span>`;
+    }
 
     return `
     <div class="peer-item${p.id === S.active ? ' active' : ''}${!p.connected ? ' offline' : ''}" data-id="${esc(p.id)}">
@@ -469,9 +507,11 @@ function renderPeerList() {
       <div class="peer-info">
         <div class="peer-name-row">
           <span class="peer-name">${esc(p.name)}</span>
+          ${fileIndicator}
           <span class="peer-badge ${p.lan ? 'lan' : 'wan'}">${p.lan ? 'LAN' : 'WAN'}</span>
+          ${unreadBadge}
         </div>
-        <div class="peer-last">${preview}</div>
+        <div class="peer-last">${activityPreview}</div>
       </div>
     </div>`;
   }).join('');
@@ -483,6 +523,7 @@ function renderPeerList() {
 
 function selectPeer(id) {
   S.active = id;
+  S.unread.delete(id); // clear unread badge when opening chat
   renderPeerList();
   renderChatPanel();
 }
@@ -512,7 +553,20 @@ function renderChatHeader(peer) {
   const disabled  = peer.connected ? '' : 'disabled';
 
   const fp  = peer.fingerprint || null;
-  const fpLabel = fp ? fp.match(/.{1,4}/g).join(' ') : 'Establishing…';
+  const fpReady = fp && fp.length >= 8;
+  // Format fingerprint in groups of 4 for readability
+  const fpLabel = fpReady ? fp.match(/.{1,4}/g).join(' ') : null;
+  const fpDisplay = fpReady ? fpLabel : 'Establishing…';
+  // Badge style changes when fingerprint is confirmed vs pending
+  const badgePendingCls = fpReady ? '' : ' enc-badge-pending';
+
+  // NIC speed display
+  const nicInfo = S.nicSpeed?.speedMbps != null
+    ? formatNicSpeed(S.nicSpeed.speedMbps)
+    : null;
+  const nicHtml = nicInfo
+    ? `<span class="nic-speed-badge" title="NIC link speed on ${S.nicSpeed.iface || 'interface'}">\u26a1 ${esc(nicInfo)}</span>`
+    : '';
 
   $('chat-header').innerHTML =
     '<div class="ch-left">' +
@@ -520,30 +574,62 @@ function renderChatHeader(peer) {
       '<div>' +
         '<div class="ch-name" style="display:flex;align-items:center;gap:7px;overflow:visible">' +
           esc(peer.name) +
-          '<span class="enc-badge" id="enc-badge-btn">' +
+          `<span class="enc-badge${badgePendingCls}" id="enc-badge-btn">` +
             '<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">' +
               '<rect x="3" y="11" width="18" height="11" rx="2"/>' +
               '<path d="M7 11V7a5 5 0 0 1 10 0v4"/>' +
             '</svg>' +
-            ' E2E' +
+            (fpReady ? ' E2E' : ' E2E…') +
             '<div class="fp-tooltip" id="fp-tooltip">' +
               '<div class="fp-label">Session Key Fingerprint</div>' +
-              '<div class="fp-value">' + esc(fpLabel) + '</div>' +
-              '<div class="fp-hint">Verify this matches on both sides for MITM protection</div>' +
+              (fpReady
+                ? `<div class="fp-value" id="fp-value-text">${esc(fpLabel)}</div>` +
+                  '<div class="fp-copy-row">' +
+                    '<div class="fp-hint">Verify this matches on both devices for MITM protection</div>' +
+                    '<button class="fp-copy-btn" id="fp-copy-btn" title="Copy fingerprint">Copy</button>' +
+                  '</div>'
+                : '<div class="fp-value fp-value-pending">Waiting for handshake…</div>' +
+                  '<div class="fp-hint">Connect to the peer first to establish an encrypted session.</div>'
+              ) +
             '</div>' +
           '</span>' +
+          nicHtml +
         '</div>' +
         '<div class="ch-status ' + statusCls + '">' + connStatus + '</div>' +
       '</div>' +
     '</div>';
 
-  // Wire fingerprint tooltip toggle
+  // Wire fingerprint tooltip — click to toggle, click outside to dismiss
   const badge = document.getElementById('enc-badge-btn');
   const tooltip = document.getElementById('fp-tooltip');
   if (badge && tooltip) {
-    badge.addEventListener('mouseenter', () => tooltip.classList.add('visible'));
-    badge.addEventListener('mouseleave', () => tooltip.classList.remove('visible'));
-    badge.addEventListener('click', () => tooltip.classList.toggle('visible'));
+    badge.addEventListener('click', e => {
+      e.stopPropagation();
+      const isVisible = tooltip.classList.contains('visible');
+      document.querySelectorAll('.fp-tooltip.visible').forEach(t => t.classList.remove('visible'));
+      if (!isVisible) {
+        // Position using fixed coords so it never gets clipped by overflow:hidden parents
+        const r = badge.getBoundingClientRect();
+        tooltip.style.top  = (r.bottom + 8) + 'px';
+        tooltip.style.left = r.left + 'px';
+        tooltip.classList.add('visible');
+      }
+    });
+    document.addEventListener('click', function closeFp(e) {
+      if (!badge.contains(e.target)) tooltip.classList.remove('visible');
+    });
+  }
+
+  // Wire copy button
+  const copyBtn = document.getElementById('fp-copy-btn');
+  if (copyBtn && fpReady) {
+    copyBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(fp).then(() => {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+      }).catch(() => {});
+    });
   }
 }
 
@@ -741,16 +827,18 @@ function renderMessages(peer) {
           <div class="msg-wrap in">
             <div class="bubble media-bubble in" style="min-width:260px">
               <div class="file-meta-row" style="margin-bottom:6px">
-                <span class="file-name">${esc(item.name)}</span>
-                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" title="Save">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
+                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+                  ${item.savedTo
+                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                    : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
               <audio controls style="width:100%;height:36px" src="${esc(url)}"></audio>
             </div>
           </div>`);
       } else if (isImage(mime)) {
-        // GIFs animate automatically — no play overlay
+        // GIFs animate automatically — no play overlay, but DO show expand + download
         const isGif = mime === 'image/gif';
         html.push(`
           <div class="msg-wrap in">
@@ -758,16 +846,18 @@ function renderMessages(peer) {
               <div class="media-thumb-wrap ${isGif ? 'gif-thumb' : 'img-thumb'}"
                    data-url="${esc(url)}" data-mime="${esc(mime)}" data-name="${esc(item.name)}">
                 <img src="${url}" alt="${esc(item.name)}" loading="lazy"/>
-                ${!isGif ? `<div class="media-overlay img-overlay">
+                <div class="media-overlay img-overlay">
                   <div class="media-expand-btn">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
                   </div>
-                </div>` : ''}
+                </div>
               </div>
               <div class="file-meta-row">
-                <span class="file-name">${esc(item.name)}</span>
-                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" title="Save">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
+                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+                  ${item.savedTo
+                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                    : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
             </div>
@@ -789,9 +879,11 @@ function renderMessages(peer) {
                 </div>
               </div>
               <div class="file-meta-row">
-                <span class="file-name">${esc(item.name)}</span>
-                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" title="Save">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
+                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+                  ${item.savedTo
+                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                    : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
             </div>
@@ -808,7 +900,7 @@ function renderMessages(peer) {
           <div class="msg-wrap out">
             <div class="bubble media-bubble out" style="min-width:260px">
               <div class="file-meta-row" style="margin-bottom:6px">
-                <span class="file-name">${esc(item.name)}</span>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
               </div>
               <audio controls style="width:100%;height:36px" src="${esc(url)}"></audio>
             </div>
@@ -822,14 +914,14 @@ function renderMessages(peer) {
               <div class="media-thumb-wrap ${isGif ? 'gif-thumb' : 'img-thumb'}"
                    data-url="${esc(url)}" data-mime="${esc(mime)}" data-name="${esc(item.name)}">
                 <img src="${url}" alt="${esc(item.name)}" loading="lazy"/>
-                ${!isGif ? `<div class="media-overlay img-overlay">
+                <div class="media-overlay img-overlay">
                   <div class="media-expand-btn">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
                   </div>
-                </div>` : ''}
+                </div>
               </div>
               <div class="file-meta-row">
-                <span class="file-name">${esc(item.name)}</span>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
               </div>
             </div>
           </div>`);
@@ -850,7 +942,7 @@ function renderMessages(peer) {
                 </div>
               </div>
               <div class="file-meta-row">
-                <span class="file-name">${esc(item.name)}</span>
+                <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
               </div>
             </div>
           </div>`);
@@ -861,7 +953,7 @@ function renderMessages(peer) {
     // Standard file bubble
     const fRBar = reactionBarHtml(S.active, item.fileId);
     html.push(`
-      <div class="msg-wrap ${out ? 'out' : 'in'}" data-mid="${esc(item.fileId)}">
+      <div class="msg-wrap ${out ? 'out' : 'in'}\" data-mid="${esc(item.fileId)}">
         <div class="bubble file-bubble ${out ? 'out' : 'in'}">
           <div class="file-icon-wrap">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -869,13 +961,15 @@ function renderMessages(peer) {
             </svg>
           </div>
           <div class="file-details">
-            <div class="file-name">${esc(item.name)}</div>
+            <div class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</div>
             <div class="file-size">${fsize(item.size)}</div>
-            ${item.savedTo ? `<div class="file-saved">✓ Saved</div>` : ''}
+            ${item.savedTo ? `<div class="file-saved">✓ Saved — click to open</div>` : ''}
           </div>
           ${!out ? `
-            <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" title="Save">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+              ${item.savedTo
+                ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
             </button>` : ''}
           <div class="bubble-actions">
             <button class="bubble-btn react-btn" data-mid="${esc(item.fileId)}" title="React">😊</button>
@@ -891,10 +985,28 @@ function renderMessages(peer) {
 
   el.innerHTML = html.join('');
 
-  // Wire: save buttons
-  el.querySelectorAll('.dl-btn').forEach(btn =>
-    btn.addEventListener('click', e => { e.stopPropagation(); window.edge.saveFile(btn.dataset.fid, btn.dataset.name); })
-  );
+  // Wire: save/open buttons
+  el.querySelectorAll('.dl-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const savedTo = btn.dataset.savedTo;
+      if (savedTo) {
+        // File already saved — open it in the OS
+        window.edge.openFile(savedTo);
+      } else {
+        // Not yet saved — show save dialog
+        window.edge.saveFile(btn.dataset.fid, btn.dataset.name);
+      }
+    });
+  });
+
+  // Wire: click filename to open already-saved files
+  el.querySelectorAll('.file-name-link').forEach(span => {
+    span.addEventListener('click', e => {
+      e.stopPropagation();
+      if (span.dataset.openPath) window.edge.openFile(span.dataset.openPath);
+    });
+  });
 
   // Wire: image lightbox (static images only — not GIFs)
   el.querySelectorAll('.img-thumb').forEach(wrap => {
@@ -1145,6 +1257,10 @@ function setupEvents() {
     const peer = S.peers.get(peerId);
     if (!peer) return;
     peer.messages.push(message);
+    // Increment unread count if this peer isn't currently open
+    if (S.active !== peerId) {
+      S.unread.set(peerId, (S.unread.get(peerId) || 0) + 1);
+    }
     renderPeerList();
     if (S.active === peerId) renderMessages(peer);
   });
@@ -1825,6 +1941,19 @@ async function init() {
   renderUpnpPill();
   renderPeerList();
   renderChatPanel();
+
+  // Fetch NIC speed and re-check every 10s (catches link speed changes like 1Gbps → 100Mbps)
+  async function refreshNicSpeed() {
+    try {
+      const result = await window.edge.getNicSpeed();
+      S.nicSpeed = result;
+      // Re-render header if a peer is active so the NIC badge updates
+      const peer = S.peers.get(S.active);
+      if (peer) renderChatHeader(peer);
+    } catch (_) {}
+  }
+  refreshNicSpeed();
+  setInterval(refreshNicSpeed, 10_000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('edge', {
   pickAndSendFile:      (peerId)              => ipcRenderer.invoke('pick-and-send-file', { peerId }),
   pickAndSendFilePath:  (peerId, fp)          => ipcRenderer.invoke('pick-and-send-file-path', { peerId, filePath: fp }),
   saveFile:             (fileId, name)        => ipcRenderer.invoke('save-file', { fileId, name }),
+  openFile:             (filePath)            => ipcRenderer.invoke('open-file', filePath),
   saveReceivedFile:     (fileId, name, mime)  => ipcRenderer.invoke('save-received-file', { fileId, name, mime }),
   respondToFile:        (fileId, peerId, ok)  => ipcRenderer.invoke('respond-to-file', { fileId, peerId, accepted: ok }),
   getFileData:          (fileId)              => ipcRenderer.invoke('get-file-data', fileId),
@@ -21,14 +22,15 @@ contextBridge.exposeInMainWorld('edge', {
   minimize:             ()                    => ipcRenderer.invoke('win-minimize'),
   maximize:             ()                    => ipcRenderer.invoke('win-maximize'),
   close:                ()                    => ipcRenderer.invoke('win-close'),
+  getNicSpeed:          ()                    => ipcRenderer.invoke('get-nic-speed'),
   on: (channel, cb) => {
     const allowed = [
       'peer-connected','peer-reconnected','peer-disconnected',
       'peer-profile-updated',
       'message-received','reaction-received',
       'file-progress','file-transfer-start','file-incoming-request',
-      'file-rejected','file-ready-to-save','file-send-start',
-      'file-send-done','file-send-rejected','upnp-status',
+      'file-rejected','file-ready-to-save','file-received',
+      'file-send-start','file-send-done','file-send-rejected','upnp-status',
     ];
     if (!allowed.includes(channel)) return () => {};
     const fn = (_, ...a) => cb(...a);

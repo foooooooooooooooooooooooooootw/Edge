@@ -1,0 +1,99 @@
+name: Build Edge
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      # utp-native (WebTorrent dep) is a native module that needs node-gyp + MSVC.
+      # windows-latest has MSVC 2022 installed but node-gyp needs to be told which version.
+      - name: Set up node-gyp
+        run: npm install -g node-gyp
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          npm_config_msvs_version: 2022
+
+      - name: Build Windows
+        # --publish never: we upload artifacts manually — avoids the
+        # "existing type not compatible" GitHub Releases error entirely.
+        run: npm run build -- --win --publish never
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-windows
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+          retention-days: 14
+
+  build-mac:
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS
+        run: npm run build -- --mac --universal --publish never
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-mac
+          path: |
+            dist/*.dmg
+            dist/*.blockmap
+          retention-days: 14
+
+  build-linux:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # rpm and fakeroot are needed by electron-builder for .deb packaging
+      - name: Install Linux packaging dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y rpm fakeroot
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Linux
+        run: npm run build -- --linux --publish never
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+          retention-days: 14

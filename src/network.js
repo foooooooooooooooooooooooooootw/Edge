@@ -11,7 +11,7 @@ const EventEmitter = require('events');
 const DISCOVERY_PORT    = 42068;
 const DEFAULT_DATA_PORT = 42069;
 const DISCOVERY_INTERVAL = 3000;
-const CHUNK_SIZE         = 65536;
+const CHUNK_SIZE         = 512 * 1024;  // 512 KB -- much better for LAN throughput
 const HANDSHAKE_TIMEOUT  = 5000;
 const UPNP_TIMEOUT_MS    = 8000;
 const UPNP_RETRIES       = 2;
@@ -61,8 +61,18 @@ function makeTempPath() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// FramedSocket — length-prefixed JSON + AES-256-GCM
+// FramedSocket -- length-prefixed framing with two frame types:
+//
+//   JSON frame   (type byte 0x00): [4-byte-len][0x00][JSON-or-AES(JSON)]
+//   BINARY frame (type byte 0x01): [4-byte-len][0x01][4-byte-fileId][raw-or-AES(data)]
+//
+// Binary frames bypass base64+JSON for file chunks, removing the main
+// throughput bottleneck (base64 inflates 64KB->87KB, JSON.stringify adds more,
+// plus multiple Buffer.concat re-allocs per chunk = ~8.5 MB/s cap on LAN).
 // ═══════════════════════════════════════════════════════════════════════════════
+const FRAME_JSON   = 0x00;
+const FRAME_BINARY = 0x01;
+
 class FramedSocket extends EventEmitter {
   constructor(socket) {
     super();
@@ -79,44 +89,87 @@ class FramedSocket extends EventEmitter {
   }
 
   _drain() {
-    while (this._buf.length >= 4) {
-      const len = this._buf.readUInt32BE(0);
-      if (len > 64 * 1024 * 1024) { this.socket.destroy(); return; }
+    while (this._buf.length >= 5) {
+      const len = this._buf.readUInt32BE(0);      // length covers type byte + inner
+      if (len > 68 * 1024 * 1024) { this.socket.destroy(); return; }
       if (this._buf.length < 4 + len) break;
-      const frame = this._buf.slice(4, 4 + len);
+      const frameType = this._buf[4];
+      const inner     = this._buf.slice(5, 4 + len);
       this._buf = this._buf.slice(4 + len);
+
       try {
-        let payload;
-        if (this._aesKey) {
-          if (frame.length < 28) continue;
-          const d = crypto.createDecipheriv('aes-256-gcm', this._aesKey, frame.slice(0, 12));
-          d.setAuthTag(frame.slice(12, 28));
-          payload = Buffer.concat([d.update(frame.slice(28)), d.final()]);
+        if (frameType === FRAME_BINARY) {
+          // Decrypt if needed, then split [4-byte fileId][chunk data]
+          let payload;
+          if (this._aesKey) {
+            if (inner.length < 28) continue;
+            const d = crypto.createDecipheriv('aes-256-gcm', this._aesKey, inner.slice(0, 12));
+            d.setAuthTag(inner.slice(12, 28));
+            payload = Buffer.concat([d.update(inner.slice(28)), d.final()]);
+          } else {
+            payload = inner;
+          }
+          if (payload.length < 4) continue;
+          const fileId = payload.slice(0, 4).toString('hex');
+          const data   = payload.slice(4);
+          this.emit('binary-chunk', { fileId, data });
         } else {
-          payload = frame;
+          // Standard JSON frame
+          let payload;
+          if (this._aesKey) {
+            if (inner.length < 28) continue;
+            const d = crypto.createDecipheriv('aes-256-gcm', this._aesKey, inner.slice(0, 12));
+            d.setAuthTag(inner.slice(12, 28));
+            payload = Buffer.concat([d.update(inner.slice(28)), d.final()]);
+          } else {
+            payload = inner;
+          }
+          this.emit('message', JSON.parse(payload.toString('utf8')));
         }
-        this.emit('message', JSON.parse(payload.toString('utf8')));
       } catch (_) {}
     }
   }
 
+  // Send a JSON control message (all non-chunk messages)
   send(obj) {
     if (this.socket.destroyed) return true;
     try {
       const json = Buffer.from(JSON.stringify(obj), 'utf8');
-      let frame;
+      let inner;
       if (this._aesKey) {
         const iv  = crypto.randomBytes(12);
         const c   = crypto.createCipheriv('aes-256-gcm', this._aesKey, iv);
         const enc = Buffer.concat([c.update(json), c.final()]);
-        frame     = Buffer.concat([iv, c.getAuthTag(), enc]);
+        inner     = Buffer.concat([iv, c.getAuthTag(), enc]);
       } else {
-        frame = json;
+        inner = json;
       }
-      const hdr = Buffer.allocUnsafe(4);
-      hdr.writeUInt32BE(frame.length, 0);
-      // Return the socket.write result — false means TCP buffer is full (need drain)
-      return this.socket.write(Buffer.concat([hdr, frame]));
+      const hdr = Buffer.allocUnsafe(5);
+      hdr.writeUInt32BE(1 + inner.length, 0);
+      hdr[4] = FRAME_JSON;
+      return this.socket.write(Buffer.concat([hdr, inner]));
+    } catch (_) { return true; }
+  }
+
+  // Send a raw binary chunk -- no base64, no JSON.
+  // fileIdHex: 8-char hex string (4 bytes).  data: Buffer of raw chunk bytes.
+  sendBinary(fileIdHex, data) {
+    if (this.socket.destroyed) return true;
+    try {
+      const idBuf = Buffer.from(fileIdHex, 'hex');   // 4 bytes
+      let inner;
+      if (this._aesKey) {
+        const iv  = crypto.randomBytes(12);
+        const c   = crypto.createCipheriv('aes-256-gcm', this._aesKey, iv);
+        const enc = Buffer.concat([c.update(Buffer.concat([idBuf, data])), c.final()]);
+        inner     = Buffer.concat([iv, c.getAuthTag(), enc]);
+      } else {
+        inner = Buffer.concat([idBuf, data]);
+      }
+      const hdr = Buffer.allocUnsafe(5);
+      hdr.writeUInt32BE(1 + inner.length, 0);
+      hdr[4] = FRAME_BINARY;
+      return this.socket.write(Buffer.concat([hdr, inner]));
     } catch (_) { return true; }
   }
 
@@ -217,6 +270,7 @@ class NetworkManager extends EventEmitter {
         this._registerPeer(peerId, { id:msg.id, name:msg.name, ip:socket.remoteAddress?.replace('::ffff:',''), port:msg.listenPort, lan:msg.lan??true, socket, framed, connected:true, messages:[], files:[], fingerprint:fp, profilePic:msg.profilePic||null });
       } else { this._handleMsg(peerId, msg); }
     });
+    framed.on('binary-chunk', ({ fileId, data }) => { if (peerId) this._handleBinaryChunk(peerId, fileId, data); });
     framed.on('close', () => this._onPeerClose(peerId));
     framed.on('error', () => {});
   }
@@ -240,6 +294,7 @@ class NetworkManager extends EventEmitter {
             resolve(this._publicPeer(peerId));
           } else { this._handleMsg(peerId, msg); }
         });
+        framed.on('binary-chunk', ({ fileId, data }) => { if (peerId) this._handleBinaryChunk(peerId, fileId, data); });
         framed.on('close', () => this._onPeerClose(peerId));
         framed.on('error', () => {});
       });
@@ -373,6 +428,7 @@ class NetworkManager extends EventEmitter {
       }
 
       case 'file_chunk': {
+        // Legacy fallback: old clients still send base64 JSON chunks
         const t = this._incoming.get(msg.fileId);
         if (t) {
           const chunk = Buffer.from(msg.chunk, 'base64');
@@ -400,6 +456,16 @@ class NetworkManager extends EventEmitter {
         break;
       }
     }
+  }
+
+  // ── Binary chunk handler (fast path for file data) ───────────────────────────
+
+  _handleBinaryChunk(peerId, fileId, data) {
+    const t = this._incoming.get(fileId);
+    if (!t) return;
+    t.writeStream.write(data);
+    t.received += data.length;
+    this.emit('file-progress', { peerId, fileId, received:t.received, size:t.size });
   }
 
   // ── Accept / reject file requests (called by app layer) ──────────────────────
@@ -476,20 +542,23 @@ class NetworkManager extends EventEmitter {
 
     const fd = fs.openSync(filePath, 'r');
     let offset = 0;
+    let chunksSinceYield = 0;
     try {
       while (offset < size) {
         const toRead = Math.min(CHUNK_SIZE, size - offset);
         const buf    = Buffer.allocUnsafe(toRead);
         fs.readSync(fd, buf, 0, toRead, offset);
-        const ok = peer.framed.send({ type:'file_chunk', fileId, chunk:buf.toString('base64') });
+        // Use binary frame -- no base64, no JSON, no re-allocs
+        const ok = peer.framed.sendBinary(fileId, buf);
         offset += toRead;
         this.emit('file-progress', { peerId, fileId, name, received:offset, size, fromSender:true });
         if (!ok) {
-          // TCP send buffer full — wait for drain before writing more
           await peer.framed.drain();
-        } else {
-          // Yield to event loop so messages/UI events aren't starved
+          chunksSinceYield = 0;
+        } else if (++chunksSinceYield >= 8) {
+          // Yield every ~4 MB (8 x 512 KB) so UI stays responsive
           await new Promise(r => setImmediate(r));
+          chunksSinceYield = 0;
         }
       }
     } finally { fs.closeSync(fd); }
