@@ -42,11 +42,8 @@ jobs:
 
   build-mac:
     runs-on: macos-latest
-<<<<<<< HEAD
     env:
       GH_TOKEN: ""
-=======
->>>>>>> 7f3f4141594f6c76c84019fc780bfc02017a961b
     steps:
       - uses: actions/checkout@v4
 
@@ -58,11 +55,7 @@ jobs:
         run: npm ci
 
       - name: Build macOS
-<<<<<<< HEAD
         run: npm run build -- --mac --universal --publish never
-=======
-        run: npm run build -- --mac --universal
->>>>>>> 7f3f4141594f6c76c84019fc780bfc02017a961b
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -72,14 +65,11 @@ jobs:
             dist/*.dmg
             dist/*.blockmap
           retention-days: 14
-
+          
   build-linux:
     runs-on: ubuntu-latest
-<<<<<<< HEAD
     env:
       GH_TOKEN: ""
-=======
->>>>>>> 7f3f4141594f6c76c84019fc780bfc02017a961b
     steps:
       - uses: actions/checkout@v4
 
