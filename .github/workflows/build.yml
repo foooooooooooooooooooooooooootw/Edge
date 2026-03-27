@@ -27,9 +27,7 @@ jobs:
           npm_config_msvs_version: 2022
 
       - name: Build Windows
-        # --publish never: we upload artifacts manually — avoids the
-        # "existing type not compatible" GitHub Releases error entirely.
-        run: npm run build -- --win --publish never
+        run: npm run build -- --win --publish=never
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -55,7 +53,7 @@ jobs:
         run: npm ci
 
       - name: Build macOS
-        run: npm run build -- --mac --universal --publish never
+        run: npm run build -- --mac --publish=never
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -87,7 +85,7 @@ jobs:
         run: npm ci
 
       - name: Build Linux
-        run: npm run build -- --linux --publish never
+        run: npm run build -- --linux --publish=never
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
