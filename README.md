@@ -15,7 +15,7 @@ Edge is a modern desktop file transfer/messaging application built with:
 -   Node.js
 -   WebTorrent(soon!)
 
-The name was inspired by **edge routers** which are "located at the boundary of a network (the "edge") that connects an internal Local Area Network (LAN) to external networks". And definitely nothing else.
+The name was inspired by **edge routers** which are "located at the boundary of a network (the "edge") that connects an internal Local Area Network (LAN) to external networks". Also partly inspired by **edge computing**, the antithesis of our current cloud based infrastructure - where computing is done on **your** device. Edge combines both ideas, putting control and power directly into your hands - and those of your peers - across any network. 
 
 
 ### ✨ Features
@@ -41,7 +41,6 @@ If someone needs a file:
 
 
 # 🌐 Transport Modes
-<br></nr>
 ## ⚡ LAN Mode
 
 -   Automatic peer discovery
