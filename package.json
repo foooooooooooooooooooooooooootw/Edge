@@ -1,7 +1,7 @@
 {
   "name": "edge",
   "productName": "Edge",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "P2P messaging and file sharing over LAN and internet",
   "main": "main.js",
   "author": {
@@ -19,7 +19,7 @@
   "build": {
     "appId": "com.edge.p2p",
     "productName": "Edge",
-    "copyright": "Copyright © 2025",
+    "copyright": "Copyright © 2026",
     "asar": true,
     "directories": {
       "output": "dist",

@@ -8,3 +8,5 @@ node_modules/*
 res/ss1.png
 res/ss2.png
 res/ss3.png
+out/
+out/*

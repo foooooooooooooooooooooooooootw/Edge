@@ -65,7 +65,9 @@ function uniqueDest(dir, name) {
 function pubPeer(peer) {
   return { id:peer.id, name:peer.name, ip:peer.ip, port:peer.port,
            lan:peer.lan, connected:peer.connected, messages:peer.messages,
-           files:(peer.files||[]).map(f=>({...f})) };
+           files:(peer.files||[]).map(f=>({...f})),
+           fingerprint:peer.fingerprint||null,
+           profilePic:peer.profilePic||null };
 }
 
 // Save a file: try rename first (instant, same-filesystem), fall back to async copy
@@ -196,8 +198,8 @@ ipcMain.handle('get-my-info', () => ({
   profilePic:  settings.get('profilePic'),
 }));
 
-ipcMain.handle('send-reaction', (_, { peerId, msgId, emoji }) => {
-  try { net.sendReaction(peerId, msgId, emoji); return { success:true }; }
+ipcMain.handle('send-reaction', (_, { peerId, msgId, emoji, remove }) => {
+  try { net.sendReaction(peerId, msgId, emoji, !!remove); return { success:true }; }
   catch (err) { return { success:false, error:err.message }; }
 });
 

@@ -368,7 +368,7 @@ class NetworkManager extends EventEmitter {
       }
 
       case 'reaction': {
-        this.emit('reaction-received', { peerId, msgId: msg.msgId, emoji: msg.emoji });
+        this.emit('reaction-received', { peerId, msgId: msg.msgId, emoji: msg.emoji, remove: !!msg.remove });
         break;
       }
 
@@ -495,10 +495,10 @@ class NetworkManager extends EventEmitter {
     return local;
   }
 
-  sendReaction(peerId, msgId, emoji) {
+  sendReaction(peerId, msgId, emoji, remove = false) {
     const peer = this.peers.get(peerId);
     if (!peer?.framed) throw new Error('Peer not connected');
-    peer.framed.send({ type:'reaction', msgId, emoji });
+    peer.framed.send({ type:'reaction', msgId, emoji, remove });
   }
 
   // Broadcast updated profile pic to all connected peers

@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('edge', {
   getPeers:             ()                    => ipcRenderer.invoke('get-peers'),
   addPeer:              (ip, port)            => ipcRenderer.invoke('add-peer', { ip, port }),
   sendMessage:          (peerId, text, replyTo) => ipcRenderer.invoke('send-message', { peerId, text, replyTo: replyTo||null }),
-  sendReaction:         (peerId, msgId, emoji) => ipcRenderer.invoke('send-reaction', { peerId, msgId, emoji }),
+  sendReaction:         (peerId, msgId, emoji, remove) => ipcRenderer.invoke('send-reaction', { peerId, msgId, emoji, remove: !!remove }),
   pickAndSendFile:      (peerId)              => ipcRenderer.invoke('pick-and-send-file', { peerId }),
   pickAndSendFilePath:  (peerId, fp)          => ipcRenderer.invoke('pick-and-send-file-path', { peerId, filePath: fp }),
   saveFile:             (fileId, name)        => ipcRenderer.invoke('save-file', { fileId, name }),

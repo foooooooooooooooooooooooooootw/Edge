@@ -739,11 +739,7 @@ audio {
   display: none; position: fixed;
   background: var(--bg-elevated); border: 1px solid var(--border);
   border-radius: 10px; padding: 10px 14px; z-index: 99999;
-<<<<<<< HEAD
   min-width: 280px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
-=======
-  min-width: 260px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
->>>>>>> 7f3f4141594f6c76c84019fc780bfc02017a961b
   white-space: normal; pointer-events: none;
 }
 .fp-tooltip.visible { display: block; pointer-events: auto; }
@@ -797,16 +793,44 @@ audio {
   color: #f59e0b; font-size: 11.5px; font-weight: 500;
 }
 
-/* ── Clickable saved filenames ───────────────────────────────────── */
-.file-name-link {
-  cursor: pointer;
-  text-decoration: underline dotted;
-  text-underline-offset: 2px;
-  transition: color 0.12s;
+/* ── Emoji-only messages (no bubble, big display like Telegram/Discord) ── */
+.emoji-only-msg {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 6px;
+  position: relative;
+  padding: 2px 4px;
+  border-radius: 10px;
+  cursor: default;
 }
-.file-name-link:hover { color: var(--accent); }
-
-/* ── Clickable saved filenames ───────────────────────────────────── */
+.emoji-only-msg:hover .bubble-actions { opacity: 1; pointer-events: auto; }
+.emoji-only-msg.out { flex-direction: row-reverse; }
+.emoji-only-text {
+  font-size: 48px;
+  line-height: 1.1;
+  display: block;
+  user-select: none;
+}
+.emoji-only-text img.tw-emoji {
+  width: 48px !important;
+  height: 48px !important;
+}
+.emoji-only-time {
+  font-size: 10px;
+  color: var(--text-3);
+  white-space: nowrap;
+  padding-bottom: 4px;
+  flex-shrink: 0;
+}
+.emoji-bubble-actions {
+  position: absolute;
+  top: -28px;
+  right: 0;
+  left: auto;
+}
+.emoji-only-msg.in .emoji-bubble-actions { right: auto; left: 0; }
+.msg-wrap.out .emoji-only-msg { justify-content: flex-end; }
+.msg-wrap.out .reaction-bar  { justify-content: flex-end; }
 .file-name-link {
   cursor: pointer;
   text-decoration: underline dotted;

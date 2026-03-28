@@ -231,7 +231,12 @@ function addReaction(peerId, msgId, emoji, fromMe) {
   if (!r.has(msgId)) r.set(msgId, new Map());
   const m = r.get(msgId);
   const key = fromMe ? `me:${emoji}` : `them:${emoji}`;
-  m.set(key, emoji);
+  // Toggle: if already reacted with this emoji, remove it
+  if (fromMe && m.has(key)) {
+    m.delete(key);
+  } else {
+    m.set(key, emoji);
+  }
 }
 
 function reactionBarHtml(peerId, msgId) {
@@ -304,6 +309,17 @@ function fspeed(bps) {
   if (bps < 1024)    return bps.toFixed(0) + ' B/s';
   if (bps < 1048576) return (bps / 1024).toFixed(1) + ' KB/s';
   return (bps / 1048576).toFixed(1) + ' MB/s';
+}
+
+// Detect if a string is purely emoji characters (no text) — for big naked emoji display
+const EMOJI_REGEX = /^(\p{Emoji_Presentation}|\p{Extended_Pictographic}|\uFE0F|\u200D|\s)+$/u;
+function isEmojiOnly(text) {
+  if (!text || text.trim().length === 0) return false;
+  const t = text.trim();
+  // Must be short (≤5 grapheme clusters) and match emoji pattern
+  const graphemes = [...new Intl.Segmenter().segment(t)].map(s => s.segment);
+  if (graphemes.length > 5) return false;
+  return EMOJI_REGEX.test(t);
 }
 
 function formatNicSpeed(mbps) {
@@ -618,7 +634,6 @@ function renderChatHeader(peer) {
     document.addEventListener('click', function closeFp(e) {
       if (!badge.contains(e.target)) tooltip.classList.remove('visible');
     });
-<<<<<<< HEAD
   }
 
   // Wire copy button
@@ -631,8 +646,6 @@ function renderChatHeader(peer) {
         setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
       }).catch(() => {});
     });
-=======
->>>>>>> 7f3f4141594f6c76c84019fc780bfc02017a961b
   }
 }
 
@@ -766,6 +779,7 @@ function renderMessages(peer) {
     if (item._k === 'msg') {
       const out   = item.from === 'me';
       const rBar  = reactionBarHtml(S.active, item.id);
+      const emojiOnly = isEmojiOnly(item.text);
 
       // Reply quote block
       let quoteHtml = '';
@@ -778,19 +792,35 @@ function renderMessages(peer) {
         </div>`;
       }
 
-      html.push(`
-        <div class="msg-wrap ${out ? 'out' : 'in'}" data-mid="${esc(item.id)}">
-          <div class="bubble ${out ? 'out' : 'in'}">
-            ${quoteHtml}
-            <div class="msg-text">${renderMarkdown(item.text)}</div>
-            <div class="msg-meta"><span class="msg-time">${ftime(item.timestamp)}</span></div>
-            <div class="bubble-actions">
-              <button class="bubble-btn react-btn" data-mid="${esc(item.id)}" title="React">😊</button>
-              <button class="bubble-btn reply-btn" data-mid="${esc(item.id)}" data-text="${esc(item.text)}" data-from="${esc(item.from)}" title="Reply">↩</button>
+      if (emojiOnly && !item.replyTo) {
+        // Big naked emoji — no bubble wrapper
+        html.push(`
+          <div class="msg-wrap ${out ? 'out' : 'in'}" data-mid="${esc(item.id)}">
+            <div class="emoji-only-msg ${out ? 'out' : 'in'}">
+              <span class="emoji-only-text">${renderEmoji(item.text.trim())}</span>
+              <span class="emoji-only-time">${ftime(item.timestamp)}</span>
+              <div class="bubble-actions emoji-bubble-actions">
+                <button class="bubble-btn react-btn" data-mid="${esc(item.id)}" title="React">😊</button>
+                <button class="bubble-btn reply-btn" data-mid="${esc(item.id)}" data-text="${esc(item.text)}" data-from="${esc(item.from)}" title="Reply">↩</button>
+              </div>
             </div>
-          </div>
-          ${rBar}
-        </div>`);
+            ${rBar}
+          </div>`);
+      } else {
+        html.push(`
+          <div class="msg-wrap ${out ? 'out' : 'in'}" data-mid="${esc(item.id)}">
+            <div class="bubble ${out ? 'out' : 'in'}">
+              ${quoteHtml}
+              <div class="msg-text">${renderMarkdown(item.text)}</div>
+              <div class="msg-meta"><span class="msg-time">${ftime(item.timestamp)}</span></div>
+              <div class="bubble-actions">
+                <button class="bubble-btn react-btn" data-mid="${esc(item.id)}" title="React">😊</button>
+                <button class="bubble-btn reply-btn" data-mid="${esc(item.id)}" data-text="${esc(item.text)}" data-from="${esc(item.from)}" title="Reply">↩</button>
+              </div>
+            </div>
+            ${rBar}
+          </div>`);
+      }
       continue;
     }
 
@@ -813,21 +843,25 @@ function renderMessages(peer) {
     // Receiver media with cached URL — show inline
     if (!out && isMedia(mime)) {
       const url = S.mediaCache.get(item.fileId);
+      const mRBar = reactionBarHtml(S.active, item.fileId);
+      const reactBtn = `<button class="bubble-btn react-btn" data-mid="${esc(item.fileId)}" title="React">😊</button>`;
 
       if (!url) {
         html.push(`
-          <div class="msg-wrap in">
+          <div class="msg-wrap in" data-mid="${esc(item.fileId)}">
             <div class="bubble media-bubble in">
               <div class="media-loading">Loading…</div>
               <div class="file-meta-row">
                 <span class="file-name">${esc(item.name)}</span>
                 <span class="file-size">${fsize(item.size)}</span>
               </div>
+              <div class="bubble-actions">${reactBtn}</div>
             </div>
+            ${mRBar}
           </div>`);
       } else if (isAudio(mime)) {
         html.push(`
-          <div class="msg-wrap in">
+          <div class="msg-wrap in" data-mid="${esc(item.fileId)}">
             <div class="bubble media-bubble in" style="min-width:260px">
               <div class="file-meta-row" style="margin-bottom:6px">
                 <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
@@ -838,13 +872,14 @@ function renderMessages(peer) {
                 </button>
               </div>
               <audio controls style="width:100%;height:36px" src="${esc(url)}"></audio>
+              <div class="bubble-actions">${reactBtn}</div>
             </div>
+            ${mRBar}
           </div>`);
       } else if (isImage(mime)) {
-        // GIFs animate automatically — no play overlay, but DO show expand + download
         const isGif = mime === 'image/gif';
         html.push(`
-          <div class="msg-wrap in">
+          <div class="msg-wrap in" data-mid="${esc(item.fileId)}">
             <div class="bubble media-bubble in">
               <div class="media-thumb-wrap ${isGif ? 'gif-thumb' : 'img-thumb'}"
                    data-url="${esc(url)}" data-mime="${esc(mime)}" data-name="${esc(item.name)}">
@@ -863,12 +898,14 @@ function renderMessages(peer) {
                     : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
+              <div class="bubble-actions">${reactBtn}</div>
             </div>
+            ${mRBar}
           </div>`);
       } else {
-        // Video — blob/file URL in cache
+        // Video
         html.push(`
-          <div class="msg-wrap in">
+          <div class="msg-wrap in" data-mid="${esc(item.fileId)}">
             <div class="bubble media-bubble in">
               <div class="media-thumb-wrap vid-thumb"
                    data-url="${esc(url)}" data-mime="${esc(mime)}" data-name="${esc(item.name)}">
@@ -889,7 +926,9 @@ function renderMessages(peer) {
                     : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
+              <div class="bubble-actions">${reactBtn}</div>
             </div>
+            ${mRBar}
           </div>`);
       }
       continue;
@@ -898,21 +937,25 @@ function renderMessages(peer) {
     // Sender media with cached preview
     if (out && isMedia(mime) && S.mediaCache.has(item.fileId)) {
       const url = S.mediaCache.get(item.fileId);
+      const mRBar = reactionBarHtml(S.active, item.fileId);
+      const reactBtn = `<button class="bubble-btn react-btn" data-mid="${esc(item.fileId)}" title="React">😊</button>`;
       if (isAudio(mime)) {
         html.push(`
-          <div class="msg-wrap out">
+          <div class="msg-wrap out" data-mid="${esc(item.fileId)}">
             <div class="bubble media-bubble out" style="min-width:260px">
               <div class="file-meta-row" style="margin-bottom:6px">
                 <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
               </div>
               <audio controls style="width:100%;height:36px" src="${esc(url)}"></audio>
+              <div class="bubble-actions">${reactBtn}</div>
             </div>
+            ${mRBar}
           </div>`);
         continue;
       } else if (isImage(mime)) {
         const isGif = mime === 'image/gif';
         html.push(`
-          <div class="msg-wrap out">
+          <div class="msg-wrap out" data-mid="${esc(item.fileId)}">
             <div class="bubble media-bubble out">
               <div class="media-thumb-wrap ${isGif ? 'gif-thumb' : 'img-thumb'}"
                    data-url="${esc(url)}" data-mime="${esc(mime)}" data-name="${esc(item.name)}">
@@ -926,12 +969,14 @@ function renderMessages(peer) {
               <div class="file-meta-row">
                 <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
               </div>
+              <div class="bubble-actions">${reactBtn}</div>
             </div>
+            ${mRBar}
           </div>`);
         continue;
       } else if (isVideo(mime)) {
         html.push(`
-          <div class="msg-wrap out">
+          <div class="msg-wrap out" data-mid="${esc(item.fileId)}">
             <div class="bubble media-bubble out">
               <div class="media-thumb-wrap vid-thumb"
                    data-url="${esc(url)}" data-mime="${esc(mime)}" data-name="${esc(item.name)}">
@@ -947,7 +992,9 @@ function renderMessages(peer) {
               <div class="file-meta-row">
                 <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
               </div>
+              <div class="bubble-actions">${reactBtn}</div>
             </div>
+            ${mRBar}
           </div>`);
         continue;
       }
@@ -1089,17 +1136,21 @@ function renderMessages(peer) {
       const msgId = btn.dataset.mid;
       const picker = buildEmojiPicker(emoji => {
         picker.remove();
-        addReaction(S.active, msgId, emoji, true);
-        window.edge.sendReaction(S.active, msgId, emoji);
+        const r = getReactions(S.active);
+        const m = r.get(msgId);
+        const alreadyReacted = m?.has(`me:${emoji}`);
+        addReaction(S.active, msgId, emoji, true); // toggles local state
+        window.edge.sendReaction(S.active, msgId, emoji, alreadyReacted); // true = remove
         const p = S.peers.get(S.active);
         if (p) renderMessages(p);
       });
       picker.className += ' inline-emoji-picker';
-      btn.closest('.bubble').appendChild(picker);
+      // Works for regular bubbles, file bubbles, and emoji-only messages
+      const parent = btn.closest('.bubble') || btn.closest('.emoji-only-msg') || btn.closest('.file-bubble');
+      if (parent) parent.appendChild(picker);
       // Smart position: flip direction based on available space
       requestAnimationFrame(() => {
-        const rect   = picker.getBoundingClientRect();
-        const bubble = btn.closest('.bubble').getBoundingClientRect();
+        const rect = picker.getBoundingClientRect();
         if (rect.top < 8) {
           picker.style.bottom = 'auto';
           picker.style.top    = 'calc(100% + 6px)';
@@ -1140,13 +1191,14 @@ function renderMessages(peer) {
     });
   });
 
-  // Wire: reaction chip toggle (add/remove own reaction)
+  // Wire: reaction chip toggle — click mine to remove, click theirs to add same
   el.querySelectorAll('.reaction-chip').forEach(chip => {
     chip.addEventListener('click', () => {
       const msgId = chip.dataset.mid;
       const emoji = chip.dataset.e;
-      addReaction(S.active, msgId, emoji, true);
-      window.edge.sendReaction(S.active, msgId, emoji);
+      const isMine = chip.classList.contains('mine');
+      addReaction(S.active, msgId, emoji, true); // toggles local state
+      window.edge.sendReaction(S.active, msgId, emoji, isMine); // send remove=true if it was mine
       const p = S.peers.get(S.active);
       if (p) renderMessages(p);
     });
@@ -1229,7 +1281,17 @@ function setupEvents() {
   });
 
   window.edge.on('peer-connected', peer => {
-    S.peers.set(peer.id, peer);
+    const ex = S.peers.get(peer.id);
+    if (ex) {
+      // Merge into existing peer to preserve messages/files/reactions
+      ex.connected = true;
+      ex.ip = peer.ip;
+      ex.lan = peer.lan;
+      if (peer.profilePic  !== undefined) ex.profilePic  = peer.profilePic;
+      if (peer.fingerprint)               ex.fingerprint = peer.fingerprint; // only update if non-null
+    } else {
+      S.peers.set(peer.id, peer);
+    }
     renderPeerList();
     if (S.active === peer.id) renderChatPanel();
   });
@@ -1239,9 +1301,8 @@ function setupEvents() {
     if (ex) {
       ex.connected  = true;
       ex.ip         = peer.ip;
-      // Preserve updated fields that may have changed
       if (peer.profilePic  !== undefined) ex.profilePic  = peer.profilePic;
-      if (peer.fingerprint !== undefined) ex.fingerprint = peer.fingerprint;
+      if (peer.fingerprint)               ex.fingerprint = peer.fingerprint; // only update if non-null/non-empty
     } else {
       S.peers.set(peer.id, peer);
     }
@@ -1268,8 +1329,15 @@ function setupEvents() {
     if (S.active === peerId) renderMessages(peer);
   });
 
-  window.edge.on('reaction-received', ({ peerId, msgId, emoji }) => {
-    addReaction(peerId, msgId, emoji, false);
+  window.edge.on('reaction-received', ({ peerId, msgId, emoji, remove }) => {
+    if (remove) {
+      // Remove their reaction
+      const r = getReactions(peerId);
+      const m = r.get(msgId);
+      if (m) m.delete(`them:${emoji}`);
+    } else {
+      addReaction(peerId, msgId, emoji, false);
+    }
     if (S.active === peerId) {
       const peer = S.peers.get(peerId);
       if (peer) renderMessages(peer);
@@ -1896,25 +1964,41 @@ async function init() {
 
   // Drag and drop onto the chat panel
   const chatEl = $('chat');
-  chatEl.addEventListener('dragover', e => {
-    if (!S.active) return;
+  let dragCounter = 0;
+
+  // Track drag at document level so entering any child still counts
+  document.addEventListener('dragenter', e => {
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-    chatEl.classList.add('drag-over');
+    dragCounter++;
+    if (S.active && chatEl.contains(e.target)) {
+      chatEl.classList.add('drag-over');
+    }
   });
-  chatEl.addEventListener('dragleave', e => {
-    if (!chatEl.contains(e.relatedTarget)) chatEl.classList.remove('drag-over');
+  document.addEventListener('dragleave', e => {
+    dragCounter--;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      chatEl.classList.remove('drag-over');
+    }
   });
-  chatEl.addEventListener('drop', e => {
-    e.preventDefault();
+  document.addEventListener('dragover', e => {
+    // Must preventDefault to allow drop
+    if (chatEl.contains(e.target)) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = S.active ? 'copy' : 'none';
+    }
+  });
+  document.addEventListener('drop', e => {
+    dragCounter = 0;
     chatEl.classList.remove('drag-over');
-    if (!S.active) return;
+    if (!chatEl.contains(e.target) || !S.active) return;
+    e.preventDefault();
     const files = Array.from(e.dataTransfer.files);
     if (files.length > 0) {
-      // Send them sequentially
       (async () => {
         for (const f of files) {
-          await window.edge.pickAndSendFilePath(S.active, f.path);
+          const filePath = f.path || f.webkitRelativePath || null;
+          if (filePath) await window.edge.pickAndSendFilePath(S.active, filePath);
         }
       })();
     }
@@ -1938,12 +2022,33 @@ async function init() {
 
   try {
     const peers = await window.edge.getPeers();
-    peers.forEach(p => S.peers.set(p.id, p));
+    peers.forEach(p => {
+      const ex = S.peers.get(p.id);
+      if (ex) {
+        // Merge — preserve fingerprint if the existing one is better
+        ex.connected = p.connected;
+        ex.ip = p.ip;
+        ex.lan = p.lan;
+        if (p.profilePic !== undefined) ex.profilePic = p.profilePic;
+        if (p.fingerprint) ex.fingerprint = p.fingerprint;
+        // Sync messages/files from network layer (source of truth)
+        ex.messages = p.messages;
+        ex.files = p.files;
+      } else {
+        S.peers.set(p.id, p);
+      }
+    });
   } catch (e) { console.error('getPeers failed:', e); }
 
   renderUpnpPill();
   renderPeerList();
   renderChatPanel();
+
+  // Short delay re-render to catch any fingerprint that arrived mid-init
+  setTimeout(() => {
+    const peer = S.peers.get(S.active);
+    if (peer) renderChatHeader(peer);
+  }, 800);
 
   // Fetch NIC speed and re-check every 10s (catches link speed changes like 1Gbps → 100Mbps)
   async function refreshNicSpeed() {
