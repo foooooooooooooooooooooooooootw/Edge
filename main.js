@@ -184,6 +184,47 @@ app.whenReady().then(async () => {
     handleIncomingFile(d);
   });
 
+  // ── Folder events ─────────────────────────────────────────────────────────
+  net.on('folder-progress', d => {
+    // Re-use the file progress throttle keyed on folderId
+    sendProgress({ fileId: d.folderId, received: d.sentBytes, size: d.totalSize, peerId: d.peerId });
+    safeSend('folder-progress', d);
+  });
+
+  net.on('folder-request', ({ peerId, folderId, name, totalSize, fileCount }) => {
+    const mode = (settings.get('fileMode') || 'ask').toLowerCase().trim();
+    if (mode === 'auto-downloads' || mode === 'auto-choose') {
+      net.acceptFolderRequest(peerId, folderId);
+      safeSend('folder-transfer-start', { peerId, folderId, name, totalSize, fileCount });
+    } else {
+      safeSend('folder-incoming-request', { peerId, folder: { folderId, name, totalSize, fileCount } });
+    }
+  });
+
+  net.on('folder-received', async ({ peerId, folder }) => {
+    safeSend('folder-progress', { peerId, folderId: folder.folderId, name: folder.name, sentBytes: folder.totalSize, totalSize: folder.totalSize, currentFile: '' });
+    clearProgress(folder.folderId);
+
+    const mode = (settings.get('fileMode') || 'ask').toLowerCase().trim();
+    if (mode === 'auto-downloads') {
+      const stored = net._receivedFolders?.get(folder.folderId);
+      if (stored) {
+        const dest = uniqueDest(app.getPath('downloads'), folder.name);
+        try { fs.cpSync(stored.tmpDir, dest, { recursive: true }); } catch (_) {}
+        net.cleanupFolder(folder.folderId);
+        safeSend('folder-received', { peerId, folder: { ...folder, savedTo: dest } });
+      }
+      return;
+    }
+    // ask / auto-choose: let user pick where to save
+    safeSend('folder-ready-to-save', { peerId, folder });
+  });
+
+  net.on('folder-rejected-by-peer', ({ peerId, folderId }) => {
+    clearProgress(folderId);
+    safeSend('folder-send-rejected', { peerId, folderId });
+  });
+
   await net.start().catch(e => console.error('[Edge] Network start error:', e));
 });
 
@@ -194,8 +235,9 @@ app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) creat
 
 ipcMain.handle('get-my-info', () => ({
   ...net.getMyInfo(),
-  displayName: settings.get('displayName'),
-  profilePic:  settings.get('profilePic'),
+  displayName:   settings.get('displayName'),
+  profilePic:    settings.get('profilePic'),
+  upnpAttempted: net._upnpAttempted || false,
 }));
 
 ipcMain.handle('send-reaction', (_, { peerId, msgId, emoji, remove }) => {
@@ -286,6 +328,103 @@ ipcMain.handle('pick-and-send-file-path', async (_, { peerId, filePath }) => {
   }
 });
 
+// ── Folder send / receive IPC ─────────────────────────────────────────────────
+
+ipcMain.handle('pick-and-send-folder', async (_, { peerId }) => {
+  const result = await dialog.showOpenDialog(win, { properties:['openDirectory'] });
+  if (result.canceled) return { success:false, canceled:true };
+  const folderPath = result.filePaths[0];
+  const folderId   = require('crypto').randomBytes(4).toString('hex');
+  const name       = path.basename(folderPath);
+  // Walk to get total size for the pre-send bubble
+  let totalSize = 0, fileCount = 0;
+  const walkSync = dir => {
+    for (const e of fs.readdirSync(dir, { withFileTypes:true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walkSync(p);
+      else { totalSize += fs.statSync(p).size; fileCount++; }
+    }
+  };
+  try { walkSync(folderPath); } catch (_) {}
+  safeSend('folder-send-start', { peerId, folderId, name, totalSize, fileCount });
+  try {
+    const rec = await net.sendFolder(peerId, folderPath, folderId);
+    clearProgress(folderId);
+    safeSend('folder-send-done', { folderId, folder: rec });
+    return { success:true, folder: rec };
+  } catch (err) {
+    clearProgress(folderId);
+    safeSend('folder-send-done', { folderId, error: err.message });
+    return { success:false, error: err.message };
+  }
+});
+
+ipcMain.handle('pick-and-send-folder-path', async (_, { peerId, folderPath }) => {
+  if (!fs.existsSync(folderPath)) return { success:false, error:'Folder not found' };
+  const stat = fs.statSync(folderPath);
+  if (!stat.isDirectory()) return { success:false, error:'Not a directory' };
+  const folderId = require('crypto').randomBytes(4).toString('hex');
+  const name     = path.basename(folderPath);
+  let totalSize = 0, fileCount = 0;
+  const walkSync = dir => {
+    for (const e of fs.readdirSync(dir, { withFileTypes:true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walkSync(p);
+      else { totalSize += fs.statSync(p).size; fileCount++; }
+    }
+  };
+  try { walkSync(folderPath); } catch (_) {}
+  safeSend('folder-send-start', { peerId, folderId, name, totalSize, fileCount });
+  try {
+    const rec = await net.sendFolder(peerId, folderPath, folderId);
+    clearProgress(folderId);
+    safeSend('folder-send-done', { folderId, folder: rec });
+    return { success:true, folder: rec };
+  } catch (err) {
+    clearProgress(folderId);
+    safeSend('folder-send-done', { folderId, error: err.message });
+    return { success:false, error: err.message };
+  }
+});
+
+ipcMain.handle('respond-to-folder', (_, { folderId, peerId, accepted }) => {
+  if (accepted) {
+    net.acceptFolderRequest(peerId, folderId);
+    safeSend('folder-transfer-start', { peerId, folderId, name:'', totalSize:0, fileCount:0 });
+  } else {
+    net.rejectFolderRequest(peerId, folderId);
+    safeSend('folder-rejected', { folderId });
+  }
+  return { success:true };
+});
+
+ipcMain.handle('save-received-folder', async (_, { folderId, name }) => {
+  const stored = net._receivedFolders?.get(folderId);
+  if (!stored?.tmpDir) return { success:false, error:'Folder not found — may have expired' };
+
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Save Folder To…',
+    defaultPath: app.getPath('downloads'),
+    properties: ['openDirectory', 'createDirectory'],
+    buttonLabel: 'Save Here',
+  });
+  if (result.canceled) return { success:false, canceled:true };
+
+  const dest = uniqueDest(result.filePaths[0], name);
+  try {
+    fs.cpSync(stored.tmpDir, dest, { recursive:true });
+    net.cleanupFolder(folderId);
+    return { success:true, savedTo:dest };
+  } catch (e) {
+    return { success:false, error:e.message };
+  }
+});
+
+ipcMain.handle('is-directory', (_, filePath) => {
+  try { return fs.statSync(filePath).isDirectory(); }
+  catch (_) { return false; }
+});
+
 ipcMain.handle('save-received-file', async (_, { fileId, name, mime }) => {
   const stored = net._receivedFiles.get(fileId);
   if (!stored?.tempPath) return { success:false, error:'File not found — may have expired' };
@@ -329,6 +468,13 @@ ipcMain.handle('save-file', async (_, { fileId, name }) => {
 ipcMain.handle('open-file', (_, filePath) => {
   if (!filePath || !fs.existsSync(filePath)) return { success:false, error:'File not found' };
   shell.openPath(filePath);
+  return { success:true };
+});
+
+// Reveal a file in Finder / Explorer without opening it
+ipcMain.handle('show-item-in-folder', (_, filePath) => {
+  if (!filePath || !fs.existsSync(filePath)) return { success:false, error:'File not found' };
+  shell.showItemInFolder(filePath);
   return { success:true };
 });
 

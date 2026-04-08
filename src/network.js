@@ -267,11 +267,12 @@ class NetworkManager extends EventEmitter {
         peerId = msg.id;
         framed.send({ type:'handshake', id:this.myId, name:this.myName, listenPort:this.dataPort, ecdhPubKey:pubKeyHex, profilePic:this.myProfilePic||null });
         const fp = this._finishHandshake(framed, ecdh, msg.ecdhPubKey);
-        this._registerPeer(peerId, { id:msg.id, name:msg.name, ip:socket.remoteAddress?.replace('::ffff:',''), port:msg.listenPort, lan:msg.lan??true, socket, framed, connected:true, messages:[], files:[], fingerprint:fp, profilePic:msg.profilePic||null });
+        // 'incoming' = true so _registerPeer knows we are the listener side
+        this._registerPeer(peerId, { id:msg.id, name:msg.name, ip:socket.remoteAddress?.replace('::ffff:',''), port:msg.listenPort, lan:msg.lan??true, socket, framed, connected:true, messages:[], files:[], fingerprint:fp, profilePic:msg.profilePic||null }, /*incoming=*/true);
       } else { this._handleMsg(peerId, msg); }
     });
     framed.on('binary-chunk', ({ fileId, data }) => { if (peerId) this._handleBinaryChunk(peerId, fileId, data); });
-    framed.on('close', () => this._onPeerClose(peerId));
+    framed.on('close', () => this._onPeerClose(peerId, framed));
     framed.on('error', () => {});
   }
 
@@ -290,12 +291,13 @@ class NetworkManager extends EventEmitter {
             clearTimeout(hst);
             peerId = msg.id;
             const fp = this._finishHandshake(framed, ecdh, msg.ecdhPubKey);
-            this._registerPeer(peerId, { id:msg.id, name:msg.name, ip, port:msg.listenPort, lan, socket, framed, connected:true, messages:[], files:[], fingerprint:fp, profilePic:msg.profilePic||null });
+            // 'incoming' = false so _registerPeer knows we are the connector side
+            this._registerPeer(peerId, { id:msg.id, name:msg.name, ip, port:msg.listenPort, lan, socket, framed, connected:true, messages:[], files:[], fingerprint:fp, profilePic:msg.profilePic||null }, /*incoming=*/false);
             resolve(this._publicPeer(peerId));
           } else { this._handleMsg(peerId, msg); }
         });
         framed.on('binary-chunk', ({ fileId, data }) => { if (peerId) this._handleBinaryChunk(peerId, fileId, data); });
-        framed.on('close', () => this._onPeerClose(peerId));
+        framed.on('close', () => this._onPeerClose(peerId, framed));
         framed.on('error', () => {});
       });
       socket.once('error', err => reject(err));
@@ -304,14 +306,61 @@ class NetworkManager extends EventEmitter {
 
   // ── Peer registry ────────────────────────────────────────────────────────────
 
-  _registerPeer(id, record) {
+  _registerPeer(id, record, incoming = false) {
     const ex = this.peers.get(id);
-    if (ex) {
+    if (ex && ex.connected) {
+      // ── Duplicate connection resolution ──────────────────────────────────────
+      // Both peers discovered each other simultaneously and each opened a TCP
+      // connection to the other. We now have two live sockets carrying two
+      // independent ECDH sessions → two different fingerprints, one per side.
+      //
+      // Fix: apply a deterministic rule that both sides compute identically so
+      // they always keep the *same* socket:
+      //
+      //   The connection where the HIGHER node-ID was the *connector* wins.
+      //
+      // "connector" means the side that called connectToPeer (outbound).
+      // On the outbound side incoming=false; on the listener side incoming=true.
+      //
+      // So: if MY id > peer id  → I should be the connector  → keep if !incoming
+      //     if MY id < peer id  → peer should be the connector → keep if  incoming
+      //
+      // This is symmetric: both peers evaluate the same condition and reach the
+      // same conclusion about which socket to keep.
+      const iShouldBeConnector = this.myId > id;
+      const keepNew = iShouldBeConnector ? !incoming : incoming;
+
+      if (!keepNew) {
+        // Discard this new connection — the existing one is the canonical session.
+        // Its close event will fire but _onPeerClose checks that the closing framed
+        // instance is still the *active* one before marking disconnected, so this
+        // won't cause a spurious offline flash.
+        record.framed.destroy();
+        return;
+      }
+
+      // Replace the existing socket with the new canonical one.
+      // Destroy the old socket — its close event fires asynchronously but
+      // _onPeerClose now ignores it because ex.framed has already been updated
+      // to the new instance before destroy() is called.
+      const oldFramed = ex.framed;
       ex.socket      = record.socket;
       ex.framed      = record.framed;
       ex.connected   = true;
       ex.ip          = record.ip;
-      // Always apply latest values from fresh handshake
+      if (record.profilePic  !== undefined) ex.profilePic  = record.profilePic;
+      if (record.fingerprint !== undefined) ex.fingerprint = record.fingerprint;
+      try { oldFramed?.destroy(); } catch (_) {}
+      this.emit('peer-reconnected', this._publicPeer(id));
+      return;
+    }
+
+    if (ex) {
+      // Peer exists but was disconnected — straightforward reconnect
+      ex.socket      = record.socket;
+      ex.framed      = record.framed;
+      ex.connected   = true;
+      ex.ip          = record.ip;
       if (record.profilePic  !== undefined) ex.profilePic  = record.profilePic;
       if (record.fingerprint !== undefined) ex.fingerprint = record.fingerprint;
       this.emit('peer-reconnected', this._publicPeer(id));
@@ -321,9 +370,14 @@ class NetworkManager extends EventEmitter {
     }
   }
 
-  _onPeerClose(peerId) {
+  _onPeerClose(peerId, framed) {
     if (!peerId) return;
     const p = this.peers.get(peerId); if (!p) return;
+    // Only mark disconnected if the socket that just closed is still the
+    // *active* socket for this peer. If _registerPeer has already swapped in
+    // a new canonical socket (duplicate-connection resolution), p.framed will
+    // no longer equal the closing framed instance — ignore it.
+    if (p.framed !== framed) return;
     p.connected=false; p.socket=null; p.framed=null;
     // Reject any pending file sends to this peer
     for (const [fid, pending] of this._pendingSend) {
@@ -455,17 +509,179 @@ class NetworkManager extends EventEmitter {
         }
         break;
       }
+
+      // ── Folder transfer ─────────────────────────────────────────────────────
+
+      case 'folder_request': {
+        this.emit('folder-request', {
+          peerId,
+          folderId:  msg.folderId,
+          name:      msg.name,
+          totalSize: msg.totalSize,
+          fileCount: msg.fileCount,
+        });
+        break;
+      }
+
+      case 'folder_accept': {
+        const pending = this._pendingSend.get(msg.folderId);
+        if (pending) { this._pendingSend.delete(msg.folderId); pending.resolve(); }
+        break;
+      }
+
+      case 'folder_reject': {
+        const pending = this._pendingSend.get(msg.folderId);
+        if (pending) { this._pendingSend.delete(msg.folderId); pending.reject(new Error('Folder rejected by receiver')); }
+        this.emit('folder-rejected-by-peer', { peerId, folderId: msg.folderId });
+        break;
+      }
+
+      case 'folder_start': {
+        // Receiver: prepare to accept a ustar (uncompressed tar) stream.
+        // All file data arrives as binary chunks keyed on folderId itself.
+        const tmpDir = path.join(os.tmpdir(), 'edge-p2p', 'folder-' + msg.folderId);
+        fs.mkdirSync(tmpDir, { recursive: true });
+        this._incomingFolders = this._incomingFolders || new Map();
+        this._incomingFolders.set(msg.folderId, {
+          tmpDir,
+          name:          msg.name,
+          totalSize:     msg.totalSize,
+          fileCount:     msg.fileCount,
+          receivedBytes: 0,
+          peerId,
+          startTime:     Date.now(),
+          // ustar parser state
+          _buf:          Buffer.alloc(0),   // accumulator for incoming bytes
+          _hdr:          null,              // current file header (once parsed)
+          _ws:           null,              // WriteStream for current file
+          _wsPath:       '',               // for progress display
+          _fileBytes:    0,                // bytes written to current file
+          _fileSize:     0,                // expected size from header
+          _padEnd:       0,                // bytes to skip after file data
+        });
+        this.emit('folder-progress', { peerId, folderId: msg.folderId, name: msg.name, sentBytes: 0, totalSize: msg.totalSize, currentFile: '' });
+        break;
+      }
+
+      case 'folder_end': {
+        const folder = this._incomingFolders?.get(msg.folderId);
+        if (!folder) break;
+        // Close any open write stream (shouldn't be needed for well-formed tar, but be safe)
+        if (folder._ws) { try { folder._ws.end(); } catch (_) {} folder._ws = null; }
+        this._incomingFolders.delete(msg.folderId);
+        this._receivedFolders = this._receivedFolders || new Map();
+        this._receivedFolders.set(msg.folderId, { tmpDir: folder.tmpDir, name: folder.name, totalSize: folder.totalSize, fileCount: folder.fileCount });
+        const rec = { folderId: msg.folderId, name: folder.name, totalSize: folder.totalSize, fileCount: folder.fileCount, from: 'them', timestamp: folder.startTime, isFolder: true };
+        peer.files.push(rec);
+        this.emit('folder-received', { peerId, folder: rec });
+        break;
+      }
     }
   }
 
   // ── Binary chunk handler (fast path for file data) ───────────────────────────
 
   _handleBinaryChunk(peerId, fileId, data) {
+    // Regular file transfer — fileId is a 4-byte hex transfer ID
     const t = this._incoming.get(fileId);
-    if (!t) return;
-    t.writeStream.write(data);
-    t.received += data.length;
-    this.emit('file-progress', { peerId, fileId, received:t.received, size:t.size });
+    if (t) {
+      t.writeStream.write(data);
+      t.received += data.length;
+      this.emit('file-progress', { peerId, fileId, received:t.received, size:t.size });
+      return;
+    }
+
+    // Folder transfer — fileId IS the folderId; data is a slice of a ustar stream.
+    // We accumulate bytes and parse the ustar format on the fly:
+    //   [512-byte header][file data, padded to 512-byte boundary][next header]...
+    const folder = this._incomingFolders?.get(fileId);
+    if (!folder) return;
+
+    folder._buf = Buffer.concat([folder._buf, data]);
+    folder.receivedBytes += data.length;
+
+    // Process as many complete ustar blocks as possible
+    let buf = folder._buf;
+    while (true) {
+      if (!folder._hdr) {
+        // Waiting for a 512-byte header block
+        if (buf.length < 512) break;
+        const hdrBlock = buf.slice(0, 512);
+        buf = buf.slice(512);
+
+        // Two zero blocks = end-of-archive (we also handle via folder_end message)
+        if (hdrBlock.every(b => b === 0)) continue;
+
+        // Parse ustar header
+        const readStr  = (off, len) => hdrBlock.slice(off, off + len).toString('utf8').replace(/\0+$/, '');
+        const readOctal = (off, len) => parseInt(readStr(off, len).trim() || '0', 8);
+        const relPath  = readStr(0, 100);
+        const fileSize = readOctal(124, 12);
+        const typeflag = readStr(156, 1);
+
+        if (typeflag === '5' || fileSize === 0 && relPath.endsWith('/')) {
+          // Directory entry — just create it
+          const safeParts = relPath.split('/').map(p => p.replace(/\.\./g, '_')).filter(Boolean);
+          const absPath   = path.join(folder.tmpDir, ...safeParts);
+          try { fs.mkdirSync(absPath, { recursive: true }); } catch (_) {}
+          continue;
+        }
+
+        // Regular file — sanitise path and open write stream
+        const safeParts = relPath.split('/').map(p => p.replace(/\.\./g, '_')).filter(Boolean);
+        const absPath   = path.join(folder.tmpDir, ...safeParts);
+        try { fs.mkdirSync(path.dirname(absPath), { recursive: true }); } catch (_) {}
+
+        let ws = null;
+        try { ws = fs.createWriteStream(absPath); } catch (e) { console.error('[Edge] folder write error:', e.message); }
+
+        const padded  = Math.ceil(fileSize / 512) * 512;
+        folder._hdr      = { relPath: safeParts.join('/'), fileSize };
+        folder._ws       = ws;
+        folder._wsPath   = safeParts.join('/');
+        folder._fileBytes = 0;
+        folder._fileSize = fileSize;
+        folder._padEnd   = padded - fileSize;  // bytes to discard after real data
+      }
+
+      // We have a current file — consume data bytes then padding
+      if (folder._hdr) {
+        const remaining = folder._fileSize - folder._fileBytes;
+        if (remaining > 0) {
+          const take   = Math.min(remaining, buf.length);
+          if (take > 0) {
+            if (folder._ws) folder._ws.write(buf.slice(0, take));
+            folder._fileBytes += take;
+            buf = buf.slice(take);
+          }
+          if (folder._fileBytes < folder._fileSize) break; // need more data
+        }
+        // File data complete — close stream
+        if (folder._ws) {
+          folder._ws.end();
+          folder._ws = null;
+        }
+        // Skip ustar padding bytes
+        const skip = folder._padEnd;
+        if (buf.length < skip) {
+          // Not enough data to consume the padding yet — store what we consumed and wait
+          // We need to track how many padding bytes we've already skipped
+          folder._padEnd -= buf.length;
+          buf = buf.slice(buf.length);
+          break;
+        }
+        buf = buf.slice(skip);
+        folder._padEnd   = 0;
+        folder._hdr      = null;
+        folder._fileBytes = 0;
+        folder._fileSize = 0;
+        folder._wsPath   = '';
+
+        this.emit('folder-progress', { peerId, folderId: fileId, name: folder.name, sentBytes: folder.receivedBytes, totalSize: folder.totalSize, currentFile: folder._wsPath });
+      }
+    }
+    folder._buf = buf;
+    this.emit('folder-progress', { peerId, folderId: fileId, name: folder.name, sentBytes: folder.receivedBytes, totalSize: folder.totalSize, currentFile: folder._wsPath });
   }
 
   // ── Accept / reject file requests (called by app layer) ──────────────────────
@@ -480,6 +696,18 @@ class NetworkManager extends EventEmitter {
     const peer = this.peers.get(peerId);
     if (!peer?.framed) return;
     peer.framed.send({ type:'file_reject', fileId });
+  }
+
+  acceptFolderRequest(peerId, folderId) {
+    const peer = this.peers.get(peerId);
+    if (!peer?.framed) return;
+    peer.framed.send({ type:'folder_accept', folderId });
+  }
+
+  rejectFolderRequest(peerId, folderId) {
+    const peer = this.peers.get(peerId);
+    if (!peer?.framed) return;
+    peer.framed.send({ type:'folder_reject', folderId });
   }
 
   // ── Send ─────────────────────────────────────────────────────────────────────
@@ -569,6 +797,166 @@ class NetworkManager extends EventEmitter {
     return rec;
   }
 
+  // ── Folder transfer ───────────────────────────────────────────────────────────
+  // Protocol:
+  //   sender → folder_request  { folderId, name, totalSize, fileCount }
+  //   receiver → folder_accept / folder_reject  { folderId }
+  //   sender → folder_start    { folderId, name, totalSize, fileCount }
+  //   for each file:
+  //     sender → folder_file_start  { folderId, fileId, relativePath, size, mime }
+  //     sender → [binary frames using fileId]
+  //     sender → folder_file_end    { folderId, fileId }
+  //   sender → folder_end      { folderId }
+
+  // Walk a directory recursively, returning { relativePath, absPath, size, mime }[]
+  _walkDir(dirPath) {
+    const entries = [];
+    const walk = (abs, rel) => {
+      for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+        const childAbs = path.join(abs, entry.name);
+        const childRel = rel ? rel + '/' + entry.name : entry.name;
+        if (entry.isDirectory()) {
+          walk(childAbs, childRel);
+        } else if (entry.isFile()) {
+          const size = fs.statSync(childAbs).size;
+          entries.push({ relativePath: childRel, absPath: childAbs, size, mime: detectMime(entry.name) });
+        }
+      }
+    };
+    walk(dirPath, '');
+    return entries;
+  }
+
+  // ── Ustar helpers ─────────────────────────────────────────────────────────────
+
+  // Write a null-terminated, null-padded string into a buffer at offset
+  static _ustarStr(buf, offset, len, str) {
+    buf.fill(0, offset, offset + len);
+    buf.write(str.slice(0, len - 1), offset, 'utf8');
+  }
+
+  // Write a zero-padded octal number into a buffer at offset
+  static _ustarOctal(buf, offset, len, value) {
+    buf.fill(0, offset, offset + len);
+    const s = value.toString(8).padStart(len - 1, '0');
+    buf.write(s, offset, 'ascii');
+  }
+
+  // Build a 512-byte ustar header block for one file entry
+  _ustarHeader(relPath, size) {
+    const hdr = Buffer.alloc(512, 0);
+    NetworkManager._ustarStr  (hdr,   0, 100, relPath);       // name
+    NetworkManager._ustarOctal(hdr, 100,   8, 0o000644);      // mode
+    NetworkManager._ustarOctal(hdr, 108,   8, 0);             // uid
+    NetworkManager._ustarOctal(hdr, 116,   8, 0);             // gid
+    NetworkManager._ustarOctal(hdr, 124,  12, size);          // size
+    NetworkManager._ustarOctal(hdr, 136,  12, Math.floor(Date.now() / 1000)); // mtime
+    hdr.fill(0x20, 148, 156);                                  // checksum placeholder (spaces)
+    hdr[156] = 0x30;                                           // typeflag '0' = regular file
+    hdr.write('ustar  \0', 257, 'ascii');                      // magic
+    // Compute checksum over header with spaces in checksum field
+    let csum = 0;
+    for (let i = 0; i < 512; i++) csum += hdr[i];
+    NetworkManager._ustarOctal(hdr, 148, 8, csum);
+    return hdr;
+  }
+
+  async sendFolder(peerId, folderPath, folderId = null) {
+    const peer = this.peers.get(peerId);
+    if (!peer?.framed) throw new Error('Peer not connected');
+
+    const name = path.basename(folderPath);
+    if (!folderId) folderId = crypto.randomBytes(4).toString('hex');
+
+    // Enumerate all files first so we can report total size
+    const files     = this._walkDir(folderPath);
+    const totalSize = files.reduce((s, f) => s + f.size, 0);
+    const fileCount = files.length;
+
+    // ── Step 1: request + wait for accept ────────────────────────────────────
+    peer.framed.send({ type:'folder_request', folderId, name, totalSize, fileCount });
+
+    await new Promise((resolve, reject) => {
+      const tid = setTimeout(() => {
+        this._pendingSend.delete(folderId);
+        reject(new Error('Folder request timed out'));
+      }, FILE_ACCEPT_TIMEOUT);
+      this._pendingSend.set(folderId, {
+        peerId,
+        resolve: () => { clearTimeout(tid); resolve(); },
+        reject:  (e) => { clearTimeout(tid); reject(e); },
+      });
+    });
+
+    // ── Step 2: stream as a single ustar (store-only tar) binary stream ──────
+    // Using folderId as the binary frame fileId — one continuous stream, no
+    // per-file JSON framing overhead. Each file becomes:
+    //   [512-byte ustar header][file data][0–511 bytes padding to 512-boundary]
+    // Two 512-byte zero blocks terminate the archive (then we also send folder_end).
+    const sendStartTime = Date.now();
+    let sentBytes       = 0;
+    peer.framed.send({ type:'folder_start', folderId, name, totalSize, fileCount });
+
+    // We send chunks of up to CHUNK_SIZE bytes. We accumulate the ustar output
+    // into a write buffer and flush whenever it reaches CHUNK_SIZE.
+    const FLUSH_SIZE = CHUNK_SIZE;
+    let pending      = [];     // Buffer[] waiting to be sent as one chunk
+    let pendingLen   = 0;
+    let chunksSinceYield = 0;
+
+    const flush = async () => {
+      if (pendingLen === 0) return;
+      const chunk = Buffer.concat(pending, pendingLen);
+      pending    = [];
+      pendingLen = 0;
+      const ok   = peer.framed.sendBinary(folderId, chunk);
+      sentBytes += chunk.length;
+      if (!ok) await peer.framed.drain();
+      else if (++chunksSinceYield >= 8) {
+        await new Promise(r => setImmediate(r));
+        chunksSinceYield = 0;
+      }
+    };
+
+    const write = async (buf) => {
+      pending.push(buf);
+      pendingLen += buf.length;
+      if (pendingLen >= FLUSH_SIZE) await flush();
+    };
+
+    for (const f of files) {
+      // Header
+      await write(this._ustarHeader(f.relativePath, f.size));
+
+      // File data
+      const fd = fs.openSync(f.absPath, 'r');
+      let offset = 0;
+      try {
+        while (offset < f.size) {
+          const toRead = Math.min(FLUSH_SIZE, f.size - offset);
+          const buf    = Buffer.allocUnsafe(toRead);
+          fs.readSync(fd, buf, 0, toRead, offset);
+          await write(buf);
+          offset += toRead;
+          this.emit('folder-progress', { peerId, folderId, name, sentBytes: sentBytes + pendingLen, totalSize, currentFile: f.relativePath });
+        }
+      } finally { fs.closeSync(fd); }
+
+      // Padding to 512-byte boundary
+      const pad = (512 - (f.size % 512)) % 512;
+      if (pad > 0) await write(Buffer.alloc(pad, 0));
+    }
+
+    // End-of-archive: two 512-byte zero blocks
+    await write(Buffer.alloc(1024, 0));
+    await flush();
+
+    peer.framed.send({ type:'folder_end', folderId });
+    const rec = { folderId, name, totalSize, fileCount, from:'me', timestamp: sendStartTime, isFolder: true };
+    peer.files.push(rec);
+    return rec;
+  }
+
   // ── LAN Discovery ────────────────────────────────────────────────────────────
 
   _startUDP() {
@@ -607,7 +995,7 @@ class NetworkManager extends EventEmitter {
   async _tryUPnP() {
     let upnp;
     try { upnp = require('nat-upnp'); }
-    catch (_) { this.emit('upnp-status', { success:false, reason:'nat-upnp not installed' }); return; }
+    catch (_) { this._upnpAttempted = true; this.emit('upnp-status', { success:false, reason:'nat-upnp not installed' }); return; }
 
     for (let i = 1; i <= UPNP_RETRIES; i++) {
       try { this._upnpClient?.close?.(); } catch (_) {}
@@ -636,11 +1024,15 @@ class NetworkManager extends EventEmitter {
 
         const extIp = await this._upnpCall(cb => client.externalIp(cb));
         this.externalIp = extIp;
+        this._upnpAttempted = true;
         this.emit('upnp-status', { success:true, port:this.upnpPort, ip:extIp });
         return;
       } catch (err) {
         console.warn(`[Edge] UPnP attempt ${i}: ${err.message}`);
-        if (i === UPNP_RETRIES) this.emit('upnp-status', { success:false, reason:err.message });
+        if (i === UPNP_RETRIES) {
+          this._upnpAttempted = true;
+          this.emit('upnp-status', { success:false, reason:err.message });
+        }
         else await new Promise(r => setTimeout(r, 1500));
       }
     }
@@ -661,6 +1053,12 @@ class NetworkManager extends EventEmitter {
     this._receivedFiles.delete(fileId);
   }
 
+  cleanupFolder(folderId) {
+    const f = this._receivedFolders?.get(folderId);
+    if (f?.tmpDir) { try { fs.rmSync(f.tmpDir, { recursive:true, force:true }); } catch (_) {} }
+    this._receivedFolders?.delete(folderId);
+  }
+
   stop() {
     if (this._discInterval) clearInterval(this._discInterval);
     try { this.udp?.close(); } catch (_) {}
@@ -668,8 +1066,12 @@ class NetworkManager extends EventEmitter {
     if (this._upnpClient && this.upnpPort)
       this._upnpClient.portUnmapping({ public:this.upnpPort }, () => {});
     for (const [id] of this._receivedFiles) this.cleanupFile(id);
+    for (const [id] of (this._receivedFolders || [])) this.cleanupFolder(id);
     for (const [, t] of this._incoming) {
       try { t.writeStream.destroy(); fs.unlinkSync(t.tempPath); } catch (_) {}
+    }
+    for (const [, folder] of (this._incomingFolders || [])) {
+      try { fs.rmSync(folder.tmpDir, { recursive:true, force:true }); } catch (_) {}
     }
     for (const [, p] of this._pendingSend) {
       p.reject(new Error('Application closing'));

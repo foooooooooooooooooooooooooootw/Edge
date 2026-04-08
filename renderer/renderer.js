@@ -499,21 +499,26 @@ function renderPeerList() {
       ? `<span class="peer-unread">${unreadCount > 99 ? '99+' : unreadCount}</span>`
       : '';
 
-    // ── Incoming file indicator ───────────────────────────────────
-    const hasPending = p.pendingDecisions?.size > 0;
-    const hasIncoming = [...(p.inTransfers?.values() || [])].some(t => t.from === 'them' && t.status === 'receiving');
+    // ── Incoming file/folder indicator ───────────────────────────
+    const hasPending = (p.pendingDecisions?.size > 0) || [...(p.folderTransfers?.values() || [])].some(t => t.status === 'pending');
+    const hasIncoming = [...(p.inTransfers?.values() || [])].some(t => t.from === 'them' && t.status === 'receiving')
+      || [...(p.folderTransfers?.values() || [])].some(t => t.from === 'them' && t.status === 'receiving');
     const fileIndicator = (hasPending || hasIncoming)
-      ? `<span class="peer-file-indicator" title="${hasPending ? 'Incoming file request' : 'Receiving file'}">📥</span>`
+      ? `<span class="peer-file-indicator" title="${hasPending ? 'Incoming request' : 'Receiving'}">📥</span>`
       : '';
 
     // ── Activity row: show what's happening ──────────────────────
     let activityPreview = preview;
     if (hasPending) {
-      const pending = [...p.pendingDecisions.values()][0];
-      activityPreview = `<span class="peer-incoming-file">📁 Incoming file: ${esc(pending.name || 'file')}</span>`;
+      const pendingFile   = p.pendingDecisions?.size > 0 ? [...p.pendingDecisions.values()][0] : null;
+      const pendingFolder = [...(p.folderTransfers?.values() || [])].find(t => t.status === 'pending');
+      const pendingItem   = pendingFile || pendingFolder;
+      activityPreview = `<span class="peer-incoming-file">📁 Incoming ${pendingFolder ? 'folder' : 'file'}: ${esc(pendingItem?.name || '')}</span>`;
     } else if (hasIncoming) {
-      const incoming = [...p.inTransfers.values()].find(t => t.from === 'them' && t.status === 'receiving');
-      activityPreview = `<span class="peer-incoming-file">📥 Receiving: ${esc(incoming?.name || 'file')}</span>`;
+      const incoming       = [...(p.inTransfers?.values() || [])].find(t => t.from === 'them' && t.status === 'receiving');
+      const incomingFolder = [...(p.folderTransfers?.values() || [])].find(t => t.from === 'them' && t.status === 'receiving');
+      const active         = incoming || incomingFolder;
+      activityPreview = `<span class="peer-incoming-file">📥 Receiving: ${esc(active?.name || '')}</span>`;
     }
 
     return `
@@ -654,11 +659,13 @@ function updateInputState(peer) {
   const input = $('msg-input');
   const send  = $('send-btn');
   const att   = $('attach-btn');
+  const fld   = $('folder-btn');
   const on    = peer?.connected;
   input.disabled    = !on;
   input.placeholder = on ? 'Message…' : 'Peer offline…';
   send.disabled     = !on;
   att.disabled      = !on;
+  if (fld) fld.disabled = !on;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -666,6 +673,79 @@ function updateInputState(peer) {
 // ═══════════════════════════════════════════════════════════════════
 
 // Build inline transfer bubble HTML
+function folderBubbleHtml(t) {
+  const prog       = S.fileProgress.get(t.folderId);
+  const received   = prog?.received ?? 0;
+  const total      = t.totalSize || 1;
+  const pct        = Math.min(100, Math.round((received / total) * 100));
+  const speed      = prog?.speed || 0;
+  const isPending  = t.status === 'pending';
+  const isWaiting  = t.status === 'waiting';
+  const isRejected = t.status === 'rejected';
+  const out        = t.from === 'me';
+  const showBar    = !isPending && !isWaiting && !isRejected;
+  const shortId    = t.folderId.slice(0, 6);
+
+  const folderIcon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+
+  const subParts = [fsize(t.totalSize || 0), t.fileCount ? t.fileCount + ' files' : ''];
+  const subInfo  = subParts.filter(Boolean).join(' · ');
+
+  let currentFileRow = '';
+  if (showBar && t.currentFile) {
+    currentFileRow = '<div class="tb-current-file" title="' + esc(t.currentFile) + '">' + esc(t.currentFile) + '</div>';
+  }
+
+  let statusRow = '';
+  if (isRejected) {
+    statusRow = '<div class="tb-status declined">✕ Declined by receiver</div>';
+  } else if (isWaiting) {
+    statusRow = '<div class="tb-status waiting">⋯ Waiting for receiver…</div>';
+  } else if (isPending) {
+    statusRow =
+      '<div class="tb-actions">' +
+        '<button class="tb-btn decline folder-decline" data-fid="' + esc(t.folderId) + '" data-pid="' + esc(t.peerId || '') + '">Decline</button>' +
+        '<button class="tb-btn accept folder-accept" data-fid="' + esc(t.folderId) + '" data-pid="' + esc(t.peerId || '') + '">Accept</button>' +
+      '</div>';
+  }
+
+  return '<div class="msg-wrap ' + (out ? 'out' : 'in') + '">' +
+    '<div class="transfer-bubble ' + (out ? 'out' : 'in') + (isRejected ? ' declined' : '') + '" data-fid="' + esc(t.folderId) + '">' +
+      '<div class="tb-header">' +
+        '<div class="tb-icon" ' + (!out && !isPending && !isWaiting ? 'style="color:var(--online)"' : '') + '>' + folderIcon + '</div>' +
+        '<div class="tb-meta">' +
+          '<div class="tb-name">' + esc(t.name) + '</div>' +
+          '<div class="tb-sub"><span>' + subInfo + '</span><span class="tb-id">#' + shortId + '</span>' +
+            '<span class="tb-speed">' + (showBar && speed > 0 ? fspeed(speed) : '') + '</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      currentFileRow +
+      (showBar ? '<div class="tb-progress-wrap"><div class="tb-bar-track"><div class="tb-bar" style="width:' + pct + '%"></div></div><span class="tb-pct">' + pct + '%</span></div>' : '') +
+      statusRow +
+    '</div>' +
+  '</div>';
+}
+
+function folderReadyToSaveBubbleHtml(t) {
+  const folderIcon = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+  const subInfo = fsize(t.totalSize || 0) + (t.fileCount ? ' · ' + t.fileCount + ' files' : '');
+
+  return '<div class="msg-wrap in">' +
+    '<div class="transfer-bubble in" data-fid="' + esc(t.folderId) + '">' +
+      '<div class="tb-header">' +
+        '<div class="tb-icon" style="color:var(--online)">' + folderIcon + '</div>' +
+        '<div class="tb-meta">' +
+          '<div class="tb-name">' + esc(t.name) + '</div>' +
+          '<div class="tb-sub"><span>' + subInfo + '</span></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="tb-progress-wrap"><div class="tb-bar-track"><div class="tb-bar" style="width:100%;background:var(--online)"></div></div><span class="tb-pct">100%</span></div>' +
+      '<div class="tb-actions"><button class="tb-btn accept folder-save-btn" data-fid="' + esc(t.folderId) + '" data-name="' + esc(t.name) + '">Save Folder</button></div>' +
+    '</div>' +
+  '</div>';
+}
+
 function transferBubbleHtml(t, direction) {
   const prog    = S.fileProgress.get(t.fileId);
   const received = prog?.received ?? 0;
@@ -724,7 +804,7 @@ function readyToSaveBubbleHtml(t) {
   } else if (cachedUrl && isVideo(mime)) {
     previewHtml = '<div class="rts-preview">' +
       '<div class="media-thumb-wrap vid-thumb" data-url="' + esc(cachedUrl) + '" data-mime="' + esc(mime) + '" data-name="' + esc(t.name) + '">' +
-        '<video muted preload="metadata" playsinline style="max-height:200px;width:100%;border-radius:6px"><source src="' + esc(cachedUrl) + '" type="' + esc(mime) + '"/></video>' +
+        '<video muted preload="metadata" playsinline style="max-height:200px;width:100%;border-radius:6px"><source src="' + esc(cachedUrl) + '"/></video>' +
         '<div class="media-overlay vid-overlay"><div class="media-expand-btn"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3l14 9-14 9V3z"/></svg></div></div>' +
       '</div>' +
     '</div>';
@@ -755,10 +835,12 @@ function renderMessages(peer) {
   // Build unified timeline from messages, completed files, in-transit, and pending decisions
   const items = [
     ...(peer.messages        || []).map(m => ({ ...m, _k: 'msg' })),
-    ...(peer.files           || []).map(f => ({ ...f, _k: 'file' })),
+    ...(peer.files           || []).map(f => ({ ...f, _k: f.isFolder ? 'folder-file' : 'file' })),
     ...[...(peer.inTransfers      || new Map()).values()].map(t => ({ ...t, _k: 'transfer' })),
     ...[...(peer.pendingDecisions || new Map()).values()].map(t => ({ ...t, _k: 'transfer' })),
     ...[...(peer.readyToSave      || new Map()).values()].map(t => ({ ...t, _k: 'ready' })),
+    ...[...(peer.folderTransfers  || new Map()).values()].map(t => ({ ...t, _k: 'folder-transfer' })),
+    ...[...(peer.folderReadyToSave|| new Map()).values()].map(t => ({ ...t, _k: 'folder-ready' })),
   ].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
 
   if (!items.length) {
@@ -830,9 +912,54 @@ function renderMessages(peer) {
       continue;
     }
 
+    // ── Folder in-transit / pending / rejected ──────────────────────
+    if (item._k === 'folder-transfer') {
+      html.push(folderBubbleHtml(item));
+      continue;
+    }
+
     // ── Ready to save (ask mode: transfer done, awaiting user save) ─
     if (item._k === 'ready') {
       html.push(readyToSaveBubbleHtml(item));
+      continue;
+    }
+
+    // ── Folder ready to save ────────────────────────────────────────
+    if (item._k === 'folder-ready') {
+      html.push(folderReadyToSaveBubbleHtml(item));
+      continue;
+    }
+
+    // ── Completed folder (already saved) ───────────────────────────
+    if (item._k === 'folder-file') {
+      const out = item.from === 'me';
+      const folderIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+      const subInfo = fsize(item.totalSize || 0) + (item.fileCount ? ' · ' + item.fileCount + ' files' : '');
+      const mRBar = reactionBarHtml(S.active, item.folderId);
+      const reactBtn = '<button class="bubble-btn react-btn" data-mid="' + esc(item.folderId) + '" title="React">😊</button>';
+      html.push(
+        '<div class="msg-wrap ' + (out ? 'out' : 'in') + '" data-mid="' + esc(item.folderId) + '">' +
+          '<div class="bubble file-bubble ' + (out ? 'out' : 'in') + '">' +
+            '<div class="file-meta-row">' +
+              '<span class="file-icon">' + folderIcon + '</span>' +
+              '<div class="file-info">' +
+                '<span class="file-name' + (item.savedTo ? ' file-name-link' : '') + '"' +
+                  (item.savedTo ? ' data-open-path="' + esc(item.savedTo) + '"' : '') + '>' +
+                  esc(item.name) +
+                '</span>' +
+                '<span class="file-sub">' + subInfo + '</span>' +
+              '</div>' +
+              (item.savedTo
+                ? '<button class="dl-btn" data-saved-to="' + esc(item.savedTo) + '" title="Show in folder">' +
+                    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>' +
+                  '</button>'
+                : '') +
+            '</div>' +
+            '<div class="bubble-actions">' + reactBtn + '</div>' +
+          '</div>' +
+          mRBar +
+        '</div>'
+      );
       continue;
     }
 
@@ -865,9 +992,9 @@ function renderMessages(peer) {
             <div class="bubble media-bubble in" style="min-width:260px">
               <div class="file-meta-row" style="margin-bottom:6px">
                 <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
-                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Show in folder' : 'Save'}">
                   ${item.savedTo
-                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`
                     : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
@@ -892,9 +1019,9 @@ function renderMessages(peer) {
               </div>
               <div class="file-meta-row">
                 <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
-                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Show in folder' : 'Save'}">
                   ${item.savedTo
-                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`
                     : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
@@ -910,7 +1037,7 @@ function renderMessages(peer) {
               <div class="media-thumb-wrap vid-thumb"
                    data-url="${esc(url)}" data-mime="${esc(mime)}" data-name="${esc(item.name)}">
                 <video muted preload="metadata" playsinline>
-                  <source src="${url}" type="${esc(mime)}"/>
+                  <source src="${url}"/>
                 </video>
                 <div class="media-overlay vid-overlay">
                   <div class="media-expand-btn">
@@ -920,9 +1047,9 @@ function renderMessages(peer) {
               </div>
               <div class="file-meta-row">
                 <span class="file-name${item.savedTo ? ' file-name-link' : ''}" ${item.savedTo ? `data-open-path="${esc(item.savedTo)}"` : ''}>${esc(item.name)}</span>
-                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+                <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Show in folder' : 'Save'}">
                   ${item.savedTo
-                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                    ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`
                     : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
                 </button>
               </div>
@@ -981,7 +1108,7 @@ function renderMessages(peer) {
               <div class="media-thumb-wrap vid-thumb"
                    data-url="${esc(url)}" data-mime="${esc(mime)}" data-name="${esc(item.name)}">
                 <video muted preload="metadata" playsinline>
-                  <source src="${url}" type="${esc(mime)}"/>
+                  <source src="${url}"/>
                 </video>
                 <div class="media-overlay vid-overlay">
                   <div class="media-expand-btn">
@@ -1016,9 +1143,9 @@ function renderMessages(peer) {
             ${item.savedTo ? `<div class="file-saved">✓ Saved — click to open</div>` : ''}
           </div>
           ${!out ? `
-            <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Open file' : 'Save'}">
+            <button class="dl-btn" data-fid="${esc(item.fileId)}" data-name="${esc(item.name)}" ${item.savedTo ? `data-saved-to="${esc(item.savedTo)}"` : ''} title="${item.savedTo ? 'Show in folder' : 'Save'}">
               ${item.savedTo
-                ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`
+                ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`
                 : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`}
             </button>` : ''}
           <div class="bubble-actions">
@@ -1041,8 +1168,8 @@ function renderMessages(peer) {
       e.stopPropagation();
       const savedTo = btn.dataset.savedTo;
       if (savedTo) {
-        // File already saved — open it in the OS
-        window.edge.openFile(savedTo);
+        // File already saved — reveal it in Finder / Explorer
+        window.edge.showItemInFolder(savedTo);
       } else {
         // Not yet saved — show save dialog
         window.edge.saveFile(btn.dataset.fid, btn.dataset.name);
@@ -1070,13 +1197,33 @@ function renderMessages(peer) {
   // Wire: video hover-preview + click-to-lightbox
   el.querySelectorAll('.vid-thumb').forEach(wrap => {
     const vid = wrap.querySelector('video');
-    wrap.addEventListener('mouseenter', () => { if (vid) { vid.volume = 0.5; vid.play().catch(() => {}); } });
-    wrap.addEventListener('mouseleave', () => { if (vid) { vid.pause(); vid.currentTime = 0; } });
-    wrap.addEventListener('click',      () => openLightbox(wrap.dataset.url, wrap.dataset.mime, wrap.dataset.name));
+
+    // The thumbnail <video> uses a <source> child. If that <source> has a
+    // type= attribute like "video/x-matroska" or "video/mp4" Chromium does a
+    // capability pre-check and can reject the source before loading a single
+    // byte — even for codecs it can actually decode (H.265, AV1, etc.). The
+    // lightbox works because it sets vid.src directly with no type attribute.
+    // Fix: remove the type attribute so Chromium sniffs the actual bitstream.
+    if (vid) {
+      const source = vid.querySelector('source');
+      if (source) source.removeAttribute('type');
+    }
+
+    wrap.addEventListener('mouseenter', () => {
+      if (!vid || vid.error) return;
+      vid.volume = 0.5;
+      vid.play().catch(() => {});
+    });
+    wrap.addEventListener('mouseleave', () => {
+      if (!vid) return;
+      vid.pause();
+      vid.currentTime = 0;
+    });
+    wrap.addEventListener('click', () => openLightbox(wrap.dataset.url, wrap.dataset.mime, wrap.dataset.name));
   });
 
   // Wire: Accept button (ask mode — fires before transfer, sends accept to peer)
-  el.querySelectorAll('.tb-btn.accept:not(.save-btn)').forEach(btn => {
+  el.querySelectorAll('.tb-btn.accept:not(.save-btn):not(.folder-accept):not(.folder-save-btn)').forEach(btn => {
     btn.addEventListener('click', () => {
       const fid = btn.dataset.fid;
       const pid = btn.dataset.pid;
@@ -1088,12 +1235,60 @@ function renderMessages(peer) {
     });
   });
 
-  // Wire: Decline button
-  el.querySelectorAll('.tb-btn.decline').forEach(btn => {
+  // Wire: Decline button (files)
+  el.querySelectorAll('.tb-btn.decline:not(.folder-decline)').forEach(btn => {
     btn.addEventListener('click', () => {
       const fid = btn.dataset.fid;
       const pid = btn.dataset.pid;
       window.edge.respondToFile(fid, pid, false);
+    });
+  });
+
+  // Wire: Folder accept button
+  el.querySelectorAll('.tb-btn.folder-accept').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const fid = btn.dataset.fid;
+      const pid = btn.dataset.pid;
+      btn.textContent = 'Accepted…';
+      btn.disabled = true;
+      const decBtn = btn.closest('.tb-actions')?.querySelector('.folder-decline');
+      if (decBtn) decBtn.disabled = true;
+      window.edge.respondToFolder(fid, pid, true);
+    });
+  });
+
+  // Wire: Folder decline button
+  el.querySelectorAll('.tb-btn.folder-decline').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const fid = btn.dataset.fid;
+      const pid = btn.dataset.pid;
+      window.edge.respondToFolder(fid, pid, false);
+    });
+  });
+
+  // Wire: Save Folder button
+  el.querySelectorAll('.tb-btn.folder-save-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const fid  = btn.dataset.fid;
+      const name = btn.dataset.name;
+      btn.textContent = 'Saving…';
+      btn.disabled = true;
+      const result = await window.edge.saveReceivedFolder(fid, name);
+      if (result.success) {
+        for (const peer of S.peers.values()) {
+          if (!peer.folderReadyToSave?.has(fid)) continue;
+          const entry = peer.folderReadyToSave.get(fid);
+          peer.folderReadyToSave.delete(fid);
+          if (!peer.files) peer.files = [];
+          peer.files.push({ ...entry, savedTo: result.savedTo, isFolder: true });
+          renderPeerList();
+          if (S.active === peer.id) renderMessages(peer);
+          break;
+        }
+      } else if (!result.canceled) {
+        btn.textContent = 'Save Folder';
+        btn.disabled = false;
+      }
     });
   });
 
@@ -1268,6 +1463,10 @@ async function sendFile(peerId) {
   await window.edge.pickAndSendFile(peerId);
 }
 
+async function sendFolder(peerId) {
+  await window.edge.pickAndSendFolder(peerId);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Network Events
 // ═══════════════════════════════════════════════════════════════════
@@ -1293,7 +1492,15 @@ function setupEvents() {
       S.peers.set(peer.id, peer);
     }
     renderPeerList();
-    if (S.active === peer.id) renderChatPanel();
+    if (S.active === peer.id) {
+      renderChatPanel();
+      // Ensure the chat header (which shows E2E fingerprint) is always
+      // re-rendered when a connection completes — renderChatPanel calls
+      // renderChatHeader internally, but call it explicitly here as well
+      // so the fingerprint badge updates even if the panel was already open.
+      const p = S.peers.get(peer.id);
+      if (p) renderChatHeader(p);
+    }
   });
 
   window.edge.on('peer-reconnected', peer => {
@@ -1302,12 +1509,23 @@ function setupEvents() {
       ex.connected  = true;
       ex.ip         = peer.ip;
       if (peer.profilePic  !== undefined) ex.profilePic  = peer.profilePic;
-      if (peer.fingerprint)               ex.fingerprint = peer.fingerprint; // only update if non-null/non-empty
+      // Always overwrite fingerprint on reconnect — a new ECDH handshake
+      // produces a new session key, so the old fingerprint is stale.
+      // The original guard `if (peer.fingerprint)` was correct but we also
+      // need to clear a stale fingerprint if the new handshake hasn't
+      // resolved yet (peer.fingerprint may be null transiently — keep old).
+      if (peer.fingerprint)               ex.fingerprint = peer.fingerprint;
     } else {
       S.peers.set(peer.id, peer);
     }
     renderPeerList();
-    if (S.active === peer.id) renderChatPanel();
+    if (S.active === peer.id) {
+      renderChatPanel();
+      // Explicitly re-render the header so the E2E fingerprint badge
+      // reflects the new session key from the fresh handshake.
+      const p = S.peers.get(peer.id);
+      if (p) renderChatHeader(p);
+    }
   });
 
   window.edge.on('peer-disconnected', peerId => {
@@ -1560,6 +1778,134 @@ function setupEvents() {
     S.upnp = status;
     renderUpnpPill();
     window.edge.getMyInfo().then(info => { S.myInfo = info; renderMyInfo(); });
+  });
+
+  // ── Folder transfer events ────────────────────────────────────────────────
+
+  // Sender: folder dialog picked, waiting for receiver to accept
+  window.edge.on('folder-send-start', ({ peerId, folderId, name, totalSize, fileCount }) => {
+    const peer = S.peers.get(peerId);
+    if (!peer) return;
+    if (!peer.folderTransfers) peer.folderTransfers = new Map();
+    peer.folderTransfers.set(folderId, {
+      folderId, name, totalSize, fileCount, status: 'waiting', timestamp: Date.now(), from: 'me',
+    });
+    renderPeerList();
+    if (S.active === peerId) renderMessages(peer);
+  });
+
+  // Sender: done (success or error)
+  window.edge.on('folder-send-done', ({ folderId, folder, error }) => {
+    for (const peer of S.peers.values()) {
+      if (!peer.folderTransfers?.has(folderId)) continue;
+      const entry = peer.folderTransfers.get(folderId);
+      if (error) {
+        entry.status = error.includes('rejected') ? 'rejected' : 'rejected';
+        S.fileProgress.delete(folderId);
+        if (S.active === peer.id) renderMessages(peer);
+        setTimeout(() => {
+          peer.folderTransfers?.delete(folderId);
+          if (S.active === peer.id) renderMessages(S.peers.get(peer.id));
+        }, 4000);
+        break;
+      }
+      peer.folderTransfers.delete(folderId);
+      if (folder) {
+        if (!peer.files) peer.files = [];
+        peer.files.push({ ...folder, from: 'me', timestamp: entry.timestamp, isFolder: true });
+      }
+      S.fileProgress.delete(folderId);
+      renderPeerList();
+      if (S.active === peer.id) renderMessages(peer);
+      break;
+    }
+  });
+
+  // Sender: receiver declined
+  window.edge.on('folder-send-rejected', ({ peerId, folderId }) => {
+    const peer = S.peers.get(peerId);
+    if (!peer) return;
+    const entry = peer.folderTransfers?.get(folderId);
+    if (entry) entry.status = 'rejected';
+    S.fileProgress.delete(folderId);
+    if (S.active === peerId) renderMessages(peer);
+    setTimeout(() => {
+      peer.folderTransfers?.delete(folderId);
+      if (S.active === peer.id) renderMessages(S.peers.get(peer.id));
+    }, 4000);
+  });
+
+  // Receiver: incoming folder request (ask mode) — show accept/decline
+  window.edge.on('folder-incoming-request', ({ peerId, folder }) => {
+    const peer = S.peers.get(peerId);
+    if (!peer) return;
+    if (!peer.folderTransfers) peer.folderTransfers = new Map();
+    peer.folderTransfers.set(folder.folderId, {
+      ...folder, peerId, status: 'pending', from: 'them', timestamp: Date.now(),
+    });
+    renderPeerList();
+    if (S.active === peerId) renderMessages(peer);
+  });
+
+  // Receiver: accepted, bytes now flowing
+  window.edge.on('folder-transfer-start', ({ peerId, folderId, name, totalSize, fileCount }) => {
+    const peer = S.peers.get(peerId);
+    if (!peer) return;
+    if (peer.folderTransfers?.has(folderId)) {
+      // transition pending → receiving
+      const entry = peer.folderTransfers.get(folderId);
+      entry.status = 'receiving';
+      if (name) { entry.name = name; entry.totalSize = totalSize; entry.fileCount = fileCount; }
+    } else {
+      // auto mode: create entry
+      if (!peer.folderTransfers) peer.folderTransfers = new Map();
+      peer.folderTransfers.set(folderId, {
+        folderId, name, totalSize, fileCount, status: 'receiving', timestamp: Date.now(), from: 'them',
+      });
+    }
+    if (S.active === peerId) renderMessages(peer);
+  });
+
+  // Both sides: progress tick
+  window.edge.on('folder-progress', ({ peerId, folderId, sentBytes, totalSize, currentFile }) => {
+    // Update the shared fileProgress map (keyed on folderId) so folderBubbleHtml can read it
+    const prev = S.fileProgress.get(folderId) || {};
+    S.fileProgress.set(folderId, { ...prev, received: sentBytes, size: totalSize });
+    // Update currentFile on the transfer entry so the subtitle updates.
+    // Also transition the sender side from 'waiting' → 'receiving' on first progress tick
+    // (the sender never gets a folder-transfer-start event, only the receiver does).
+    const peer = S.peers.get(peerId);
+    if (peer?.folderTransfers?.has(folderId)) {
+      const entry = peer.folderTransfers.get(folderId);
+      if (entry.status === 'waiting') entry.status = 'receiving';
+      entry.currentFile = currentFile;
+    }
+    if (S.active === peerId && peer) renderMessages(peer);
+  });
+
+  // Receiver: all bytes received — ask mode → show Save Folder button
+  window.edge.on('folder-ready-to-save', ({ peerId, folder }) => {
+    const peer = S.peers.get(peerId);
+    if (!peer) return;
+    peer.folderTransfers?.delete(folder.folderId);
+    if (!peer.folderReadyToSave) peer.folderReadyToSave = new Map();
+    peer.folderReadyToSave.set(folder.folderId, { ...folder, from: 'them', timestamp: Date.now() });
+    S.fileProgress.delete(folder.folderId);
+    renderPeerList();
+    if (S.active === peerId) renderMessages(peer);
+  });
+
+  // Receiver: auto-save mode — folder already saved to disk
+  window.edge.on('folder-received', ({ peerId, folder }) => {
+    const peer = S.peers.get(peerId);
+    if (!peer) return;
+    peer.folderTransfers?.delete(folder.folderId);
+    peer.folderReadyToSave?.delete(folder.folderId);
+    if (!peer.files) peer.files = [];
+    peer.files.push({ ...folder, from: 'them', isFolder: true });
+    S.fileProgress.delete(folder.folderId);
+    renderPeerList();
+    if (S.active === peerId) renderMessages(peer);
   });
 }
 
@@ -1960,6 +2306,7 @@ async function init() {
   input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
   $('send-btn').addEventListener('click', sendMessage);
   $('attach-btn').addEventListener('click', () => { if (S.active) sendFile(S.active); });
+  $('folder-btn')?.addEventListener('click', () => { if (S.active) sendFolder(S.active); });
   $('emoji-btn').addEventListener('click',  e => { e.stopPropagation(); toggleEmojiPicker(); });
 
   // Drag and drop onto the chat panel
@@ -1998,7 +2345,14 @@ async function init() {
       (async () => {
         for (const f of files) {
           const filePath = f.path || f.webkitRelativePath || null;
-          if (filePath) await window.edge.pickAndSendFilePath(S.active, filePath);
+          if (!filePath) continue;
+          // Ask main process whether this path is a directory
+          const isDir = await window.edge.isDirectory(filePath);
+          if (isDir) {
+            await window.edge.pickAndSendFolderPath(S.active, filePath);
+          } else {
+            await window.edge.pickAndSendFilePath(S.active, filePath);
+          }
         }
       })();
     }
@@ -2018,6 +2372,16 @@ async function init() {
     if (S.myInfo.displayName) S.settings.displayName = S.myInfo.displayName;
     if (S.myInfo.profilePic)  S.settings.profilePic  = S.myInfo.profilePic;
     renderMyInfo();
+    // UPnP race fix: getMyInfo already contains upnpPort/externalIp once
+    // UPnP has completed. If upnp-status fired before our listener was
+    // registered (S.upnp is still null), synthesise the state from myInfo
+    // so the pill doesn't stay gray indefinitely.
+    if (!S.upnp && S.myInfo.upnpPort) {
+      S.upnp = { success: true, port: S.myInfo.upnpPort, ip: S.myInfo.externalIp };
+    } else if (!S.upnp && S.myInfo.upnpPort === null && S.myInfo.upnpAttempted) {
+      // UPnP was tried but failed — show the failure state
+      S.upnp = { success: false, reason: 'UPnP not available' };
+    }
   } catch (e) { console.error('getMyInfo failed:', e); }
 
   try {

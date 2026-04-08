@@ -225,8 +225,9 @@ body { font-family: 'DM Sans', system-ui, sans-serif; font-size: 14px; line-heig
 
 #input-row { display:flex; align-items:flex-end; gap:8px; padding:10px 12px; border-top:1px solid var(--border); background:var(--bg-chat); flex-shrink:0; position:relative; }
 #attach-btn,#send-btn { display:flex; align-items:center; justify-content:center; width:38px; height:38px; border:none; border-radius:50%; cursor:pointer; flex-shrink:0; transition:background 0.15s,color 0.15s,transform 0.1s; }
-#attach-btn { background:transparent; color:var(--text-2); }
-#attach-btn:hover { color:var(--accent); background:var(--accent-dim); }
+#attach-btn,#folder-btn { background:transparent; color:var(--text-2); }
+#attach-btn:hover,#folder-btn:hover { color:var(--accent); background:var(--accent-dim); }
+#folder-btn { display:flex; align-items:center; justify-content:center; width:38px; height:38px; border:none; border-radius:50%; cursor:pointer; flex-shrink:0; transition:background 0.15s,color 0.15s,transform 0.1s; }
 #send-btn { background:var(--accent); color:#fff; }
 #send-btn:hover  { background:var(--accent-press); transform:scale(1.05); }
 #send-btn:active { transform:scale(0.95); }
@@ -535,6 +536,37 @@ body { font-family: 'DM Sans', system-ui, sans-serif; font-size: 14px; line-heig
   color: white;
 }
 .vid-overlay .media-expand-btn { width: 50px; height: 50px; }
+
+/* Folder transfer — current file scrolling subtitle */
+.tb-current-file {
+  font-size: 11px;
+  color: var(--text-3);
+  padding: 2px 12px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Completed folder bubble — name + sub line */
+.file-bubble .file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.file-bubble .file-sub {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.file-bubble .file-icon {
+  display: flex;
+  align-items: center;
+  margin-right: 2px;
+  flex-shrink: 0;
+  color: var(--text-2);
+}
 
 .tb-status.waiting { color: var(--text-3); font-style: italic; }
 

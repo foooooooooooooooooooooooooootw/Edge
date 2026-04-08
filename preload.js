@@ -11,6 +11,12 @@ contextBridge.exposeInMainWorld('edge', {
   pickAndSendFilePath:  (peerId, fp)          => ipcRenderer.invoke('pick-and-send-file-path', { peerId, filePath: fp }),
   saveFile:             (fileId, name)        => ipcRenderer.invoke('save-file', { fileId, name }),
   openFile:             (filePath)            => ipcRenderer.invoke('open-file', filePath),
+  showItemInFolder:     (filePath)            => ipcRenderer.invoke('show-item-in-folder', filePath),
+  pickAndSendFolder:    (peerId)              => ipcRenderer.invoke('pick-and-send-folder', { peerId }),
+  pickAndSendFolderPath:(peerId, fp)          => ipcRenderer.invoke('pick-and-send-folder-path', { peerId, folderPath: fp }),
+  respondToFolder:      (folderId, peerId, ok) => ipcRenderer.invoke('respond-to-folder', { folderId, peerId, accepted: ok }),
+  saveReceivedFolder:   (folderId, name)      => ipcRenderer.invoke('save-received-folder', { folderId, name }),
+  isDirectory:          (filePath)            => ipcRenderer.invoke('is-directory', filePath),
   saveReceivedFile:     (fileId, name, mime)  => ipcRenderer.invoke('save-received-file', { fileId, name, mime }),
   respondToFile:        (fileId, peerId, ok)  => ipcRenderer.invoke('respond-to-file', { fileId, peerId, accepted: ok }),
   getFileData:          (fileId)              => ipcRenderer.invoke('get-file-data', fileId),
@@ -30,7 +36,11 @@ contextBridge.exposeInMainWorld('edge', {
       'message-received','reaction-received',
       'file-progress','file-transfer-start','file-incoming-request',
       'file-rejected','file-ready-to-save','file-received',
-      'file-send-start','file-send-done','file-send-rejected','upnp-status',
+      'file-send-start','file-send-done','file-send-rejected',
+      'folder-progress','folder-transfer-start','folder-incoming-request',
+      'folder-rejected','folder-ready-to-save','folder-received',
+      'folder-send-start','folder-send-done','folder-send-rejected',
+      'upnp-status',
     ];
     if (!allowed.includes(channel)) return () => {};
     const fn = (_, ...a) => cb(...a);
