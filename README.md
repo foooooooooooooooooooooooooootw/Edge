@@ -23,6 +23,7 @@ The name was inspired by **edge routers** which are "located at the boundary of 
 -   ⚡ Extremely fast LAN transfers & chat
 -   🌍 Direct WAN peer-to-peer transfers
 -   📥 No file size cap
+-   📁 Transfer folders super fast without compressing them (Leverages USTAR to stream folders, averaged 60MB/s for an ~8500 file folder)
 -   🎨 Customizable themes
 -   🔥 Edge Streak system
 
@@ -32,7 +33,7 @@ The name was inspired by **edge routers** which are "located at the boundary of 
 Edge is designed to be:
 
 -   **Direct** -- No cloud middleman required, especially for LAN. 
--   **Efficient** -- No unnecessary hops or looking for usb drives.
+-   **Efficient** -- No unnecessary hops, looking for usb drives or even compressing folders before sending.
 -   **Simple to navigate & use**
 
 If someone needs a file:
