@@ -83,6 +83,7 @@ Is it slightly competitive?\
 Prebuilt binaries are available in the Releases section:
 
 -   Windows `.exe`
+-   Linux `.AppImage` (requires FUSE)
 
 Download, run, **edge**.
 
