@@ -407,10 +407,24 @@ const THEMES = [
   { id: 'violet',  label: 'Violet',  color: '#a78bfa', bg: '#080610' },
   { id: 'slate',   label: 'Slate',   color: '#38bdf8', bg: '#0a0c10' },
   { id: 'rose',    label: 'Rose',    color: '#fb7185', bg: '#100608' },
+  { id: 'bliss',   label: '☀️ Bliss',  color: '#2563c4', bg: '#4a90d9' },
+  { id: 'hotdog',  label: '💾 Classic', color: '#000080', bg: '#008080' },
 ];
 
 function applyTheme(id) {
   document.documentElement.setAttribute('data-theme', id || 'ocean');
+  const app = document.getElementById('app');
+  if (id === 'bliss') {
+    const base = window.location.href.replace(/[^/]+$/, '');
+    app.style.backgroundImage = `url('${base}blissesque.png')`;
+    console.log('wallpaper URL:', `${base}blissesque.png`);
+    app.style.backgroundSize = 'cover';
+    app.style.backgroundPosition = 'center';
+  } else {
+    app.style.backgroundImage = '';
+    app.style.backgroundSize = '';
+    app.style.backgroundPosition = '';
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════

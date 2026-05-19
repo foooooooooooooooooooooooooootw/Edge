@@ -1,0 +1,1042 @@
+/* ════════════════════════════════════════════════════════════════
+   EDGE — "Bliss" Retro 90s / Early 2000s Skin
+   Add [data-theme="bliss"] to <html> to activate, or
+   add [data-theme="hotdog"] for the classic Win3.1 look.
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── Import retro fonts ── */
+@import url('https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&family=Press+Start+2P&display=swap');
+
+/* ════════════════════════════════════════════════════════════════
+   BLISS THEME  (Windows XP era — green hill, blue sky)
+   ════════════════════════════════════════════════════════════════ */
+[data-theme="bliss"] {
+  --bg-base:      #236aba;
+  --bg-side:      #d4e8f7;
+  --bg-chat:      #ffffff;
+  --bg-elevated:  #ece9d8;
+  --bg-hover:     #c5ddf5;
+  --bg-active:    #3d6dc4;
+  --bg-input:     #ffffff;
+  --accent:       #2563c4;
+  --accent-dim:   rgba(37,99,196,0.12);
+  --accent-glow:  rgba(37,99,196,0.25);
+  --accent-press: #1a4fa0;
+  --msg-out-bg:   #dceeff;
+  --msg-in-bg:    #f0f0f0;
+  --text-1:       #1a1a1a;
+  --text-2:       #4a5568;
+  --text-3:       #6b7280;
+  --border:       rgba(0,0,0,0.15);
+  --border-acc:   rgba(37,99,196,0.4);
+  --online:       #16a34a;
+  --offline:      #9ca3af;
+
+  /* Retro overrides */
+  --retro-titlebar-start: #1f5fc4;
+  --retro-titlebar-end:   #3a9bd5;
+  --retro-btn-face:       #ece9d8;
+  --retro-btn-shadow:     #808080;
+  --retro-btn-highlight:  #ffffff;
+  --retro-btn-darkshadow: #404040;
+  --retro-font:           'VT323', monospace;
+  --retro-font-size:      16px;
+  --retro-border-radius:  0px;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   HOTDOG THEME  (Windows 3.1 / Win95 grey classic)
+   ════════════════════════════════════════════════════════════════ */
+[data-theme="hotdog"] {
+  --bg-base:      #008080;
+  --bg-side:      #c0c0c0;
+  --bg-chat:      #c0c0c0;
+  --bg-elevated:  #c0c0c0;
+  --bg-hover:     #d4d0c8;
+  --bg-active:    #000080;
+  --bg-input:     #ffffff;
+  --accent:       #000080;
+  --accent-dim:   rgba(0,0,128,0.12);
+  --accent-glow:  rgba(0,0,128,0.25);
+  --accent-press: #000060;
+  --msg-out-bg:   #dcdcdc;
+  --msg-in-bg:    #ececec;
+  --text-1:       #000000;
+  --text-2:       #222222;
+  --text-3:       #444444;
+  --border:       rgba(0,0,0,0.3);
+  --border-acc:   rgba(0,0,128,0.5);
+  --online:       #008000;
+  --offline:      #808080;
+
+  --retro-titlebar-start: #000080;
+  --retro-titlebar-end:   #1084d0;
+  --retro-btn-face:       #c0c0c0;
+  --retro-btn-shadow:     #808080;
+  --retro-btn-highlight:  #ffffff;
+  --retro-btn-darkshadow: #000000;
+  --retro-font:           'VT323', monospace;
+  --retro-font-size:      16px;
+  --retro-border-radius:  0px;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   RETRO STRUCTURAL OVERRIDES
+   Applied to both bliss and hotdog themes
+   ════════════════════════════════════════════════════════════════ */
+[data-theme="bliss"],
+[data-theme="hotdog"] {
+
+}
+
+[data-theme="bliss"] #app {
+  background:
+    /* CSS-only Bliss wallpaper approximation */
+    radial-gradient(ellipse 120% 60% at 50% 100%, #3d9e2e 0%, #5ab831 30%, #78c73e 45%, transparent 60%),
+    radial-gradient(ellipse 80% 40% at 30% 98%, #2d8a20 0%, transparent 50%),
+    radial-gradient(ellipse 60% 30% at 70% 95%, #4aaa30 0%, transparent 45%),
+    linear-gradient(180deg, #4a90d9 0%, #6aadea 30%, #8ec5f5 55%, #b8d9f7 65%, #d0e8fb 70%);
+  background-attachment: fixed;
+  box-shadow: none;
+}
+
+[data-theme="hotdog"] #app {
+  background: #008080;
+}
+
+/* --- Title Bar --- */
+[data-theme="bliss"] #titlebar,
+[data-theme="hotdog"] #titlebar {
+  background: linear-gradient(90deg,
+    var(--retro-titlebar-start) 0%,
+    var(--retro-titlebar-end) 60%,
+    var(--retro-titlebar-start) 100%
+  );
+  border-bottom: 2px solid rgba(0,0,0,0.5);
+  height: 28px;
+  font-family: var(--retro-font);
+  font-size: var(--retro-font-size);
+  color: #ffffff;
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.6);
+}
+
+[data-theme="bliss"] #app-name,
+[data-theme="hotdog"] #app-name {
+  font-family: var(--retro-font);
+  font-size: 17px;
+  color: #ffffff;
+  letter-spacing: 0.12em;
+  text-shadow: 1px 1px 2px rgba(0,0,0,0.7);
+}
+
+/* --- Win9x style close/min/max buttons --- */
+[data-theme="bliss"] .wc-btn,
+[data-theme="hotdog"] .wc-btn {
+  width: 18px;
+  height: 18px;
+  border-radius: 0;
+  background: var(--retro-btn-face);
+  color: #000000;
+  border-top: 2px solid var(--retro-btn-highlight);
+  border-left: 2px solid var(--retro-btn-highlight);
+  border-right: 2px solid var(--retro-btn-darkshadow);
+  border-bottom: 2px solid var(--retro-btn-darkshadow);
+  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.5), inset -1px -1px 0 rgba(0,0,0,0.2);
+  font-size: 10px;
+}
+[data-theme="bliss"] .wc-btn:hover,
+[data-theme="hotdog"] .wc-btn:hover {
+  background: #d4d0c8;
+}
+[data-theme="bliss"] .wc-btn:active,
+[data-theme="hotdog"] .wc-btn:active {
+  border-top: 2px solid var(--retro-btn-darkshadow);
+  border-left: 2px solid var(--retro-btn-darkshadow);
+  border-right: 2px solid var(--retro-btn-highlight);
+  border-bottom: 2px solid var(--retro-btn-highlight);
+}
+[data-theme="bliss"] .wc-btn.danger:hover,
+[data-theme="hotdog"] .wc-btn.danger:hover {
+  background: #ff0000;
+  color: #ffffff;
+}
+
+/* --- Sidebar --- */
+[data-theme="bliss"] #sidebar {
+  background: rgba(212, 232, 247, 0.75);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-right: 2px solid rgba(255,255,255,0.6);
+  box-shadow: 2px 0 8px rgba(0,0,0,0.15);
+}
+
+[data-theme="hotdog"] #sidebar {
+  background: rgba(192,192,192,0.92);
+  border-right: 2px solid var(--retro-btn-darkshadow);
+  box-shadow: 2px 0 0 var(--retro-btn-highlight) inset;
+}
+
+/* --- Chat area --- */
+[data-theme="bliss"] #chat {
+  background: rgba(255,255,255,0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+[data-theme="hotdog"] #chat {
+  background: rgba(192,192,192,0.92);
+}
+
+/* --- Chat header --- */
+[data-theme="bliss"] #chat-header {
+  background: linear-gradient(90deg, #d4e8f7 0%, #e8f4fb 100%);
+  border-bottom: 2px solid rgba(0,0,0,0.2);
+}
+
+[data-theme="hotdog"] #chat-header {
+  background: var(--retro-btn-face);
+  border-bottom: 2px solid var(--retro-btn-darkshadow);
+}
+
+/* --- Win9x inset panel for messages area --- */
+[data-theme="bliss"] #messages,
+[data-theme="hotdog"] #messages {
+  background: rgba(255,255,255,0.5);
+  border-top: 2px solid var(--retro-btn-shadow);
+  border-left: 2px solid var(--retro-btn-shadow);
+  border-bottom: 2px solid var(--retro-btn-highlight);
+  border-right: 2px solid var(--retro-btn-highlight);
+  margin: 4px;
+  border-radius: 0;
+}
+
+/* --- Input row --- */
+[data-theme="bliss"] #input-row,
+[data-theme="hotdog"] #input-row {
+  border-top: 2px solid rgba(0,0,0,0.2);
+  background: var(--retro-btn-face);
+  padding: 6px 8px;
+  gap: 4px;
+}
+
+[data-theme="bliss"] #msg-input,
+[data-theme="hotdog"] #msg-input {
+  font-family: var(--retro-font);
+  font-size: var(--retro-font-size);
+  border-top: 2px solid var(--retro-btn-shadow);
+  border-left: 2px solid var(--retro-btn-shadow);
+  border-bottom: 2px solid var(--retro-btn-highlight);
+  border-right: 2px solid var(--retro-btn-highlight);
+  border-radius: 0;
+  background: #ffffff;
+  color: #000000;
+  padding: 3px 6px;
+}
+[data-theme="bliss"] #msg-input:focus,
+[data-theme="hotdog"] #msg-input:focus {
+  outline: 1px dotted #000080;
+  outline-offset: -1px;
+  box-shadow: none;
+}
+
+/* --- Buttons (retro 3D) --- */
+[data-theme="bliss"] #send-btn,
+[data-theme="bliss"] #attach-btn,
+[data-theme="bliss"] #folder-btn,
+[data-theme="bliss"] #emoji-btn,
+[data-theme="bliss"] #add-peer-btn,
+[data-theme="hotdog"] #send-btn,
+[data-theme="hotdog"] #attach-btn,
+[data-theme="hotdog"] #folder-btn,
+[data-theme="hotdog"] #emoji-btn,
+[data-theme="hotdog"] #add-peer-btn {
+  background: var(--retro-btn-face);
+  color: #000000;
+  border-top: 2px solid var(--retro-btn-highlight);
+  border-left: 2px solid var(--retro-btn-highlight);
+  border-right: 2px solid var(--retro-btn-darkshadow);
+  border-bottom: 2px solid var(--retro-btn-darkshadow);
+  border-radius: 0;
+  font-family: var(--retro-font);
+  font-size: 14px;
+  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.7);
+  transition: none;
+  padding: 4px 8px;
+}
+[data-theme="bliss"] #send-btn:hover,
+[data-theme="bliss"] #add-peer-btn:hover,
+[data-theme="hotdog"] #send-btn:hover,
+[data-theme="hotdog"] #add-peer-btn:hover {
+  background: #d4d0c8;
+  border-color: inherit;
+}
+[data-theme="bliss"] #send-btn:active,
+[data-theme="hotdog"] #send-btn:active {
+  border-top: 2px solid var(--retro-btn-darkshadow);
+  border-left: 2px solid var(--retro-btn-darkshadow);
+  border-right: 2px solid var(--retro-btn-highlight);
+  border-bottom: 2px solid var(--retro-btn-highlight);
+}
+
+/* --- Peer list items --- */
+[data-theme="bliss"] .peer-item:hover,
+[data-theme="hotdog"] .peer-item:hover {
+  background: #316ac5;
+  color: #ffffff;
+  border-radius: 0;
+}
+[data-theme="bliss"] .peer-item.active,
+[data-theme="hotdog"] .peer-item.active {
+  background: var(--accent);
+  color: #ffffff;
+  border-radius: 0;
+}
+[data-theme="bliss"] .peer-item.active .peer-name,
+[data-theme="bliss"] .peer-item:hover .peer-name,
+[data-theme="hotdog"] .peer-item.active .peer-name,
+[data-theme="hotdog"] .peer-item:hover .peer-name {
+  color: #ffffff;
+}
+
+/* --- Peer name / section labels in retro fonts --- */
+[data-theme="bliss"] .peer-name,
+[data-theme="bliss"] .my-name,
+[data-theme="bliss"] .ch-name,
+[data-theme="hotdog"] .peer-name,
+[data-theme="hotdog"] .my-name,
+[data-theme="hotdog"] .ch-name {
+  font-family: var(--retro-font);
+  font-size: 16px;
+}
+
+[data-theme="bliss"] .section-label,
+[data-theme="hotdog"] .section-label {
+  font-family: var(--retro-font);
+  font-size: 14px;
+  background: var(--accent);
+  color: #ffffff;
+  padding: 2px 8px;
+  letter-spacing: 0.08em;
+}
+
+/* --- Fix timestamps and all near-invisible text ---
+   Dark themes use rgba(255,255,255,0.3) for .msg-time which is
+   invisible on light backgrounds. Override every affected element. */
+
+/* Timestamps inside bubbles */
+[data-theme="bliss"] .msg-time,
+[data-theme="hotdog"] .msg-time {
+  color: #666666 !important;
+}
+[data-theme="bliss"] .bubble.out .msg-time,
+[data-theme="hotdog"] .bubble.out .msg-time {
+  color: #4466aa !important;
+}
+
+/* Sender names above bubbles */
+[data-theme="bliss"] .msg-name,
+[data-theme="hotdog"] .msg-name {
+  color: #0000cc;
+}
+[data-theme="bliss"] .msg.out .msg-name,
+[data-theme="hotdog"] .msg.out .msg-name {
+  color: #cc0000;
+}
+
+/* Peer list: last message preview line */
+[data-theme="bliss"] .peer-last,
+[data-theme="hotdog"] .peer-last {
+  color: #555555;
+}
+
+/* Date dividers between message groups */
+[data-theme="bliss"] .date-divider,
+[data-theme="hotdog"] .date-divider {
+  color: #555555;
+}
+
+/* Online/offline status text in chat header */
+[data-theme="bliss"] .ch-status.offline,
+[data-theme="hotdog"] .ch-status.offline {
+  color: #888888;
+}
+
+/* "No messages yet" italic placeholder */
+[data-theme="bliss"] .no-messages,
+[data-theme="hotdog"] .no-messages {
+  color: #888888;
+}
+
+/* Icon buttons in chat header */
+[data-theme="bliss"] .hdr-btn,
+[data-theme="hotdog"] .hdr-btn {
+  color: #444444;
+}
+[data-theme="bliss"] .hdr-btn:hover,
+[data-theme="hotdog"] .hdr-btn:hover {
+  color: #000080;
+  background: rgba(37,99,196,0.1);
+}
+
+/* Attach/folder icon buttons in input row */
+[data-theme="bliss"] #attach-btn,
+[data-theme="bliss"] #folder-btn,
+[data-theme="hotdog"] #attach-btn,
+[data-theme="hotdog"] #folder-btn {
+  color: #333333;
+}
+
+/* --- Messages: AIM / MSN bubble style --- */
+[data-theme="bliss"] .bubble,
+[data-theme="hotdog"] .bubble {
+  border-radius: 0 !important;
+  font-family: var(--retro-font);
+  font-size: var(--retro-font-size);
+  line-height: 1.4;
+  border: 1px solid rgba(0,0,0,0.2);
+  position: relative;
+}
+
+/* Outgoing: classic blue AIM */
+[data-theme="bliss"] .bubble.out,
+[data-theme="hotdog"] .bubble.out {
+  background: #ddeeff;
+  border-color: #88aacc;
+  color: #000080;
+}
+/* msg-text is the inner element that actually renders the text */
+[data-theme="bliss"] .bubble.out .msg-text,
+[data-theme="hotdog"] .bubble.out .msg-text {
+  color: #000080;
+}
+
+/* Incoming: light grey */
+[data-theme="bliss"] .bubble.in,
+[data-theme="hotdog"] .bubble.in {
+  background: #f0f0f0;
+  border-color: #aaaaaa;
+  color: #000000;
+}
+[data-theme="bliss"] .bubble.in .msg-text,
+[data-theme="hotdog"] .bubble.in .msg-text {
+  color: #000000;
+}
+
+/* Transfer bubbles use the same class pattern */
+[data-theme="bliss"] .transfer-bubble.out,
+[data-theme="hotdog"] .transfer-bubble.out {
+  background: #ddeeff;
+  border-color: #88aacc;
+  color: #000080;
+}
+[data-theme="bliss"] .transfer-bubble.in,
+[data-theme="hotdog"] .transfer-bubble.in {
+  background: #f0f0f0;
+  border-color: #aaaaaa;
+  color: #000000;
+}
+
+/* --- Transfer bubble panel --- */
+[data-theme="bliss"] .transfer-bubble,
+[data-theme="hotdog"] .transfer-bubble {
+  border-radius: 0 !important;
+  border: 2px solid rgba(0,0,0,0.2);
+  font-family: var(--retro-font);
+}
+[data-theme="bliss"] .transfer-bubble.out,
+[data-theme="hotdog"] .transfer-bubble.out {
+  background: #ddeeff;
+  border-color: #88aacc;
+}
+[data-theme="bliss"] .transfer-bubble.in,
+[data-theme="hotdog"] .transfer-bubble.in {
+  background: #f0f0f0;
+  border-color: #aaaaaa;
+}
+
+/* File icon box inside transfer panel */
+[data-theme="bliss"] .tb-icon,
+[data-theme="hotdog"] .tb-icon {
+  border-radius: 0;
+  background: #c0c0c0;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+  color: #000080;
+}
+
+/* Filename and sub text */
+[data-theme="bliss"] .tb-name,
+[data-theme="hotdog"] .tb-name {
+  font-family: var(--retro-font);
+  font-size: 16px;
+  color: #000000;
+}
+[data-theme="bliss"] .tb-sub,
+[data-theme="bliss"] .tb-pct,
+[data-theme="bliss"] .tb-speed,
+[data-theme="bliss"] .tb-avg-speed,
+[data-theme="hotdog"] .tb-sub,
+[data-theme="hotdog"] .tb-pct,
+[data-theme="hotdog"] .tb-speed,
+[data-theme="hotdog"] .tb-avg-speed {
+  font-family: var(--retro-font);
+  font-size: 13px;
+  color: #333333;
+}
+
+/* --- Windows 95 segmented progress bar --- */
+[data-theme="bliss"] .tb-bar-track,
+[data-theme="hotdog"] .tb-bar-track {
+  height: 16px;
+  border-radius: 0;
+  background: #ffffff;
+  border-top: 2px solid #808080;
+  border-left: 2px solid #808080;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+  overflow: hidden;
+  padding: 1px;
+}
+/* The fill bar — rendered as repeating segmented blocks via gradient */
+[data-theme="bliss"] .tb-bar,
+[data-theme="hotdog"] .tb-bar {
+  height: 100%;
+  border-radius: 0;
+  background: repeating-linear-gradient(
+    90deg,
+    #000080 0px,
+    #000080 10px,
+    transparent 10px,
+    transparent 12px
+  );
+  transition: width 0.15s linear;
+}
+
+/* --- Accept / Decline / Save buttons --- */
+[data-theme="bliss"] .tb-btn,
+[data-theme="hotdog"] .tb-btn,
+[data-theme="bliss"] .btn-primary,
+[data-theme="hotdog"] .btn-primary,
+[data-theme="bliss"] .btn-secondary,
+[data-theme="hotdog"] .btn-secondary,
+[data-theme="bliss"] .btn-danger,
+[data-theme="hotdog"] .btn-danger,
+[data-theme="bliss"] .btn-outline-sm,
+[data-theme="hotdog"] .btn-outline-sm {
+  border-radius: 0 !important;
+  font-family: var(--retro-font) !important;
+  font-size: 15px !important;
+  background: #c0c0c0 !important;
+  color: #000000 !important;
+  border-top: 2px solid #ffffff !important;
+  border-left: 2px solid #ffffff !important;
+  border-right: 2px solid #404040 !important;
+  border-bottom: 2px solid #404040 !important;
+  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.7) !important;
+  transition: none !important;
+  padding: 4px 12px !important;
+}
+[data-theme="bliss"] .tb-btn:active,
+[data-theme="hotdog"] .tb-btn:active,
+[data-theme="bliss"] .btn-primary:active,
+[data-theme="hotdog"] .btn-primary:active {
+  border-top-color: #404040 !important;
+  border-left-color: #404040 !important;
+  border-right-color: #ffffff !important;
+  border-bottom-color: #ffffff !important;
+}
+[data-theme="bliss"] .tb-btn:disabled,
+[data-theme="hotdog"] .tb-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Status text (Done / Declined) */
+[data-theme="bliss"] .tb-status,
+[data-theme="hotdog"] .tb-status {
+  font-family: var(--retro-font);
+  font-size: 15px;
+}
+[data-theme="bliss"] .tb-status.done,
+[data-theme="hotdog"] .tb-status.done {
+  color: #006400;
+}
+[data-theme="bliss"] .tb-status.declined,
+[data-theme="hotdog"] .tb-status.declined {
+  color: #cc0000;
+}
+
+/* File accept info panel (incoming request modal) */
+[data-theme="bliss"] .file-accept-info,
+[data-theme="hotdog"] .file-accept-info {
+  border-radius: 0;
+  background: #ffffff;
+  border-top: 2px solid #808080;
+  border-left: 2px solid #808080;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+}
+[data-theme="bliss"] .fa-icon,
+[data-theme="hotdog"] .fa-icon {
+  border-radius: 0;
+  background: #c0c0c0;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+  color: #000080;
+}
+
+/* --- Media previews — no rounded corners --- */
+[data-theme="bliss"] .media-thumb-wrap,
+[data-theme="bliss"] .media-thumb-wrap img,
+[data-theme="bliss"] .media-thumb-wrap video,
+[data-theme="bliss"] .media-thumb-wrap .media-overlay,
+[data-theme="bliss"] .media-placeholder,
+[data-theme="hotdog"] .media-thumb-wrap,
+[data-theme="hotdog"] .media-thumb-wrap img,
+[data-theme="hotdog"] .media-thumb-wrap video,
+[data-theme="hotdog"] .media-thumb-wrap .media-overlay,
+[data-theme="hotdog"] .media-placeholder {
+  border-radius: 0 !important;
+}
+/* Thin inset border around image previews */
+[data-theme="bliss"] .media-thumb-wrap,
+[data-theme="hotdog"] .media-thumb-wrap {
+  border-top: 2px solid #808080;
+  border-left: 2px solid #808080;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+}
+
+/* --- Ready-to-save media preview (the rounded one before saving) --- */
+[data-theme="bliss"] .rts-preview,
+[data-theme="hotdog"] .rts-preview {
+  border-radius: 0 !important;
+  background: #000000;
+  border-top: 2px solid #808080;
+  border-left: 2px solid #808080;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+}
+[data-theme="bliss"] .rts-preview img,
+[data-theme="bliss"] .rts-preview video,
+[data-theme="hotdog"] .rts-preview img,
+[data-theme="hotdog"] .rts-preview video {
+  border-radius: 0 !important;
+}
+
+/* --- Retro peer avatars ---
+   Hide the coloured circle when no profile pic is set, and replace it
+   with a classic Windows-style user silhouette icon. When a real
+   profile pic IS set the <img> inside overrides this automatically. */
+/* --- Peer avatar: square bevelled box, hide initials --- */
+[data-theme="bliss"] .peer-avatar,
+[data-theme="hotdog"] .peer-avatar {
+  border-radius: 0 !important;
+  background: #c0c0c0 !important;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+  color: transparent !important;
+  font-size: 0 !important;
+  overflow: hidden !important; /* keep base overflow:hidden — pseudos go on parent */
+}
+[data-theme="bliss"] .peer-avatar img,
+[data-theme="hotdog"] .peer-avatar img {
+  border-radius: 0 !important;
+}
+
+/* Silhouette drawn on .peer-item so overflow:hidden on avatar doesn't clip it.
+   We use a small inline SVG data URI — a simple head+body shape.
+   Grey for offline, green for online (peer-item without .offline class). */
+[data-theme="bliss"] .peer-item:not(:has(.peer-avatar img)) .peer-avatar,
+[data-theme="hotdog"] .peer-item:not(:has(.peer-avatar img)) .peer-avatar {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='20' cy='13' r='7' fill='%23808080'/%3E%3Cellipse cx='20' cy='32' rx='11' ry='9' fill='%23808080'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: center !important;
+  background-size: cover !important;
+}
+/* Green man when online */
+[data-theme="bliss"] .peer-item:not(.offline):not(:has(.peer-avatar img)) .peer-avatar,
+[data-theme="hotdog"] .peer-item:not(.offline):not(:has(.peer-avatar img)) .peer-avatar {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='20' cy='13' r='7' fill='%2300aa44'/%3E%3Cellipse cx='20' cy='32' rx='11' ry='9' fill='%2300cc55'/%3E%3C/svg%3E") !important;
+}
+
+/* my-avatar in sidebar header — always grey (it's you) */
+[data-theme="bliss"] .my-avatar,
+[data-theme="hotdog"] .my-avatar {
+  border-radius: 0 !important;
+  background: #c0c0c0 !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='38' height='38'%3E%3Ccircle cx='19' cy='12' r='6' fill='%23808080'/%3E%3Cellipse cx='19' cy='30' rx='10' ry='9' fill='%23808080'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: center !important;
+  background-size: cover !important;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+  color: transparent !important;
+  font-size: 0 !important;
+  overflow: hidden !important;
+}
+[data-theme="bliss"] .my-avatar img,
+[data-theme="hotdog"] .my-avatar img {
+  border-radius: 0 !important;
+}
+
+/* --- Text on active (dark blue) peer item must be light --- */
+[data-theme="bliss"] .peer-item:not(.offline):hover .peer-last,
+[data-theme="bliss"] .peer-item.active .peer-last,
+[data-theme="hotdog"] .peer-item:not(.offline):hover .peer-last,
+[data-theme="hotdog"] .peer-item.active .peer-last {
+  color: rgba(255,255,255,0.85);
+}
+[data-theme="bliss"] .peer-item:not(.offline):hover .peer-last::before,
+[data-theme="bliss"] .peer-item.active .peer-last::before,
+[data-theme="hotdog"] .peer-item:not(.offline):hover .peer-last::before,
+[data-theme="hotdog"] .peer-item.active .peer-last::before {
+  color: #90ee90; /* light green readable on dark blue */
+}
+[data-theme="bliss"] .peer-item.offline:hover .peer-last,
+[data-theme="hotdog"] .peer-item.offline:hover .peer-last {
+  color: rgba(255,255,255,0.7);
+}
+[data-theme="bliss"] .peer-item.offline:hover .peer-last::before,
+[data-theme="hotdog"] .peer-item.offline:hover .peer-last::before {
+  color: #c0c0c0;
+}
+
+/* IP address in sidebar header — needs to be readable on the
+   semi-transparent light sidebar background */
+[data-theme="bliss"] .my-addr,
+[data-theme="hotdog"] .my-addr {
+  color: #333333;
+}
+
+/* --- Chat header avatar: coloured silhouette man ---
+   Green man = online, grey man = offline.
+   Hide initials text just like peer-avatar. */
+[data-theme="bliss"] .chat-avatar,
+[data-theme="hotdog"] .chat-avatar {
+  border-radius: 0 !important;
+  background: #c0c0c0 !important;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+  color: transparent !important;
+  font-size: 0 !important;
+  position: relative;
+  overflow: visible !important;
+}
+/* Head */
+[data-theme="bliss"] .chat-avatar:not(:has(img))::before,
+[data-theme="hotdog"] .chat-avatar:not(:has(img))::before {
+  content: '';
+  position: absolute;
+  top: 3px; left: 50%;
+  transform: translateX(-50%);
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  background: #808080; /* default grey, overridden by online/offline below */
+}
+/* Body */
+[data-theme="bliss"] .chat-avatar:not(:has(img))::after,
+[data-theme="hotdog"] .chat-avatar:not(:has(img))::after {
+  content: '';
+  position: absolute;
+  bottom: 3px; left: 50%;
+  transform: translateX(-50%);
+  width: 20px; height: 13px;
+  border-radius: 5px 5px 0 0;
+  background: #808080;
+}
+
+/* Green man when peer is online — target via ch-status sibling.
+   We use the .online class on .ch-status which is a sibling of
+   the avatar inside #chat-header, so we climb up with :has() */
+[data-theme="bliss"] #chat-header:has(.ch-status.online) .chat-avatar:not(:has(img))::before,
+[data-theme="hotdog"] #chat-header:has(.ch-status.online) .chat-avatar:not(:has(img))::before {
+  background: #006400;
+}
+[data-theme="bliss"] #chat-header:has(.ch-status.online) .chat-avatar:not(:has(img))::after,
+[data-theme="hotdog"] #chat-header:has(.ch-status.online) .chat-avatar:not(:has(img))::after {
+  background: #008000;
+}
+/* Grey man when offline (already the default, but explicit) */
+[data-theme="bliss"] #chat-header:has(.ch-status.offline) .chat-avatar:not(:has(img))::before,
+[data-theme="hotdog"] #chat-header:has(.ch-status.offline) .chat-avatar:not(:has(img))::before {
+  background: #606060;
+}
+[data-theme="bliss"] #chat-header:has(.ch-status.offline) .chat-avatar:not(:has(img))::after,
+[data-theme="hotdog"] #chat-header:has(.ch-status.offline) .chat-avatar:not(:has(img))::after {
+  background: #808080;
+}
+
+[data-theme="bliss"] .chat-avatar img,
+[data-theme="hotdog"] .chat-avatar img {
+  border-radius: 0 !important;
+}
+
+
+
+/* --- Status dot → inline "Online" / "Offline" text label ---
+   Hide the green/grey dot and instead show a text badge next to
+   the peer name, just like MSN Messenger / AIM buddy lists. */
+[data-theme="bliss"] .status-dot,
+[data-theme="hotdog"] .status-dot {
+  display: none !important;
+}
+/* Inject the label via the peer-name-row using the peer-item's class.
+   We do this by styling a ::before on .peer-info when the parent
+   .peer-item is online or offline. */
+[data-theme="bliss"] .peer-item .peer-last::before,
+[data-theme="hotdog"] .peer-item .peer-last::before {
+  display: inline-block;
+  font-family: var(--retro-font);
+  font-size: 12px;
+  padding: 0 4px 0 0;
+  margin-right: 3px;
+}
+[data-theme="bliss"] .peer-item:not(.offline) .peer-last::before,
+[data-theme="hotdog"] .peer-item:not(.offline) .peer-last::before {
+  content: '● Online · ';
+  color: #00aa44;
+}
+[data-theme="bliss"] .peer-item.offline .peer-last::before,
+[data-theme="hotdog"] .peer-item.offline .peer-last::before {
+  content: '○ Offline · ';
+  color: #888888;
+}
+
+/* Settings panel --- */
+[data-theme="bliss"] #settings-panel,
+[data-theme="hotdog"] #settings-panel {
+  background: var(--retro-btn-face);
+  border-left: 3px solid var(--retro-btn-darkshadow);
+  border-top: 3px solid var(--retro-btn-darkshadow);
+  box-shadow: -4px 0 0 var(--retro-btn-highlight) inset, 0 4px 0 var(--retro-btn-highlight) inset;
+  font-family: var(--retro-font);
+  font-size: var(--retro-font-size);
+}
+
+/* --- Scrollbars: chunky Win9x style --- */
+[data-theme="bliss"] ::-webkit-scrollbar,
+[data-theme="hotdog"] ::-webkit-scrollbar {
+  width: 16px;
+}
+[data-theme="bliss"] ::-webkit-scrollbar-track,
+[data-theme="hotdog"] ::-webkit-scrollbar-track {
+  background: #c0c0c0;
+  border-left: 1px solid #808080;
+}
+[data-theme="bliss"] ::-webkit-scrollbar-thumb,
+[data-theme="hotdog"] ::-webkit-scrollbar-thumb {
+  background: #c0c0c0;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+  border-radius: 0;
+}
+
+/* --- UPnP pill: Win95 status bar chip --- */
+[data-theme="bliss"] .upnp-pill,
+[data-theme="hotdog"] .upnp-pill {
+  font-family: var(--retro-font);
+  font-size: 13px;
+  border-radius: 0;
+  background: #c0c0c0;
+  color: #000000;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #808080;
+  border-bottom: 2px solid #808080;
+  padding: 2px 6px;
+}
+[data-theme="bliss"] .upnp-pill.success,
+[data-theme="hotdog"] .upnp-pill.success {
+  background: #c0c0c0;
+  color: #006400;
+  border-color: inherit;
+}
+[data-theme="bliss"] .upnp-pill.fail,
+[data-theme="hotdog"] .upnp-pill.fail {
+  background: #c0c0c0;
+  color: #cc0000;
+  border-color: inherit;
+}
+[data-theme="bliss"] .upnp-dot,
+[data-theme="hotdog"] .upnp-dot {
+  width: 8px; height: 8px;
+  border-radius: 0;
+}
+
+/* --- Connection info modal and all modals: Win9x dialog box --- */
+[data-theme="bliss"] #modal-overlay,
+[data-theme="hotdog"] #modal-overlay {
+  background: rgba(0,0,0,0.4);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+[data-theme="bliss"] .modal,
+[data-theme="hotdog"] .modal {
+  background: #c0c0c0;
+  border-radius: 0;
+  border: none;
+  box-shadow:
+    inset 1px 1px 0 #ffffff,
+    inset -1px -1px 0 #808080,
+    2px 2px 0 #404040;
+  animation: none;
+  width: 380px;
+}
+/* Title bar of dialog */
+[data-theme="bliss"] .modal-hdr,
+[data-theme="hotdog"] .modal-hdr {
+  background: linear-gradient(90deg, #000080 0%, #1084d0 100%);
+  border-bottom: none;
+  padding: 4px 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+[data-theme="bliss"] .modal-hdr h2,
+[data-theme="hotdog"] .modal-hdr h2 {
+  font-family: var(--retro-font);
+  font-size: 16px;
+  color: #ffffff;
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.5);
+  font-weight: normal;
+}
+[data-theme="bliss"] .modal-close-btn,
+[data-theme="hotdog"] .modal-close-btn {
+  width: 18px; height: 18px;
+  background: #c0c0c0;
+  color: #000000;
+  border-radius: 0;
+  border-top: 2px solid #ffffff;
+  border-left: 2px solid #ffffff;
+  border-right: 2px solid #404040;
+  border-bottom: 2px solid #404040;
+  font-size: 11px;
+  display: flex; align-items: center; justify-content: center;
+}
+[data-theme="bliss"] .modal-close-btn:hover,
+[data-theme="hotdog"] .modal-close-btn:hover {
+  background: #ff0000;
+  color: #ffffff;
+}
+[data-theme="bliss"] .modal-body,
+[data-theme="hotdog"] .modal-body {
+  background: #c0c0c0;
+  padding: 14px 16px;
+}
+[data-theme="bliss"] .modal-body *,
+[data-theme="hotdog"] .modal-body * {
+  font-family: var(--retro-font);
+  font-size: 15px;
+  color: #000000;
+}
+/* Inset field boxes for IP/port display */
+[data-theme="bliss"] .modal-desc,
+[data-theme="hotdog"] .modal-desc {
+  font-family: var(--retro-font);
+  font-size: 14px;
+  color: #000000;
+  background: #ffffff;
+  border-top: 2px solid #808080;
+  border-left: 2px solid #808080;
+  border-right: 2px solid #ffffff;
+  border-bottom: 2px solid #ffffff;
+  padding: 4px 6px;
+  margin-bottom: 8px;
+}
+[data-theme="bliss"] .modal-desc code,
+[data-theme="hotdog"] .modal-desc code {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 13px;
+  background: transparent;
+  border-radius: 0;
+  color: #000080;
+  padding: 0;
+}
+[data-theme="bliss"] .modal-ftr,
+[data-theme="hotdog"] .modal-ftr {
+  background: #c0c0c0;
+  border-top: 1px solid #808080;
+  padding: 8px 16px 10px;
+}
+
+[data-theme="bliss"] .msg-text,
+[data-theme="bliss"] .bubble,
+[data-theme="bliss"] .transfer-bubble,
+[data-theme="hotdog"] .msg-text,
+[data-theme="hotdog"] .bubble,
+[data-theme="hotdog"] .transfer-bubble {
+  font-variant-emoji: text;
+}
+/* The tw-emoji img tags Edge injects for some emoji — desaturate them
+   to fit the retro palette */
+[data-theme="bliss"] .tw-emoji,
+[data-theme="hotdog"] .tw-emoji {
+  filter: grayscale(30%) contrast(1.1);
+  image-rendering: pixelated;
+}
+
+
+/* --- AIM-style section divider with buddy list count --- */
+[data-theme="bliss"] #peer-list,
+[data-theme="hotdog"] #peer-list {
+  background: transparent;
+}
+
+/* --- Settings tab buttons --- */
+[data-theme="bliss"] .sp-tab,
+[data-theme="hotdog"] .sp-tab {
+  font-family: var(--retro-font);
+  font-size: 15px;
+  border-radius: 0;
+  border-top: 2px solid var(--retro-btn-highlight);
+  border-left: 2px solid var(--retro-btn-highlight);
+  border-right: 2px solid var(--retro-btn-darkshadow);
+  border-bottom: none;
+}
+[data-theme="bliss"] .sp-tab.active,
+[data-theme="hotdog"] .sp-tab.active {
+  background: var(--retro-btn-face);
+  border-bottom: 2px solid var(--retro-btn-face);
+  z-index: 1;
+}
+
+/* --- Theme cards --- */
+[data-theme="bliss"] .theme-card,
+[data-theme="hotdog"] .theme-card {
+  border-radius: 0;
+  border-top: 2px solid var(--retro-btn-highlight);
+  border-left: 2px solid var(--retro-btn-highlight);
+  border-right: 2px solid var(--retro-btn-darkshadow);
+  border-bottom: 2px solid var(--retro-btn-darkshadow);
+  font-family: var(--retro-font);
+  font-size: 14px;
+}
+
+/* --- Empty state --- */
+[data-theme="bliss"] #empty-state h2,
+[data-theme="hotdog"] #empty-state h2 {
+  font-family: var(--retro-font);
+  font-size: 22px;
+  color: rgba(255,255,255,0.9);
+  text-shadow: 1px 1px 3px rgba(0,0,0,0.5);
+}
+[data-theme="bliss"] #empty-state p,
+[data-theme="hotdog"] #empty-state p {
+  font-family: var(--retro-font);
+  font-size: 16px;
+  color: rgba(255,255,255,0.75);
+  text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+}
