@@ -1,6 +1,5 @@
 # ⚡ Edge
 
-
 <p >
 <strong>Decentralized, encrypted peer-to-peer messaging + file transfer over LAN & Internet.</strong>
 <br>When someone needs a file,
@@ -9,7 +8,10 @@ just <strong>edge it to them.</strong>
 
 # 🚀 What is Edge?
 
-Edge is a modern desktop file transfer/messaging application built with:
+  https://github.com/user-attachments/assets/d7c83374-a4df-4aaa-b506-44169dd5cce7
+  
+
+#### Edge is a modern desktop file transfer/messaging application built with:
 
 -   Electron
 -   Node.js
@@ -18,7 +20,7 @@ Edge is a modern desktop file transfer/messaging application built with:
 The name was inspired by **edge routers** which are "located at the boundary of a network (the "edge") that connects an internal Local Area Network (LAN) to external networks". Also partly inspired by **edge computing**, the antithesis of our current cloud based infrastructure - where computing is done on **your** device. Edge combines both ideas, putting control and power directly into your hands - and those of your peers - across any network. 
 
 
-### ✨ Features
+# ✨ Features
 
 -   ⚡ Extremely fast LAN transfers & chat
 -   🌍 Direct WAN peer-to-peer transfers
